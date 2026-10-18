@@ -55,7 +55,7 @@ def _inspect(repository: str) -> str:
         except GithubException as exc:
             if exc.status != 404: raise
     summary.append("_Reconnaissance only: no files changed and no code was executed._")
-    return "\n\n".join(summary)[:7000]
+    return "\n\n".join(summary)[:1800]
 
 async def handle(event, payload: dict) -> str:
     action = payload["action"]
