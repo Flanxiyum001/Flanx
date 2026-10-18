@@ -36,7 +36,7 @@ from prefs import get_pref
 from authz import GITHUB_ACCESS_DENIED, github_user_allowed
 from provider_errors import configured_model_issue, safe_provider_error
 from repo_review import (
-    REPO_URL_RE, extract_repository, inspect_repository,
+    REPO_URL_RE, contains_potential_secret, extract_repository, inspect_repository,
     normalize_repository, validate_target_path,
 )
 
@@ -893,6 +893,13 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             await ctx.send(
                 "This file exceeds the safe single-file patch context limit. "
                 "No code was sent to the model or sandbox."
+            )
+            return
+        if contains_potential_secret(original_code):
+            await ctx.send(
+                "This file appears to contain a literal credential. Automatic "
+                "external AI/sandbox processing is blocked. Remove and rotate "
+                "any exposed credential using a separately approved workflow."
             )
             return
 
