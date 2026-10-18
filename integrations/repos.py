@@ -32,7 +32,6 @@ def _github():
 def _list_repos(page: int) -> tuple[list[dict], bool]:
     user = _github().get_user()
     # Pull only the requested page; no unbounded repository enumeration.
-    start = (page - 1) * PER_PAGE
     repos = user.get_repos(sort="updated", direction="desc", affiliation="owner,collaborator,organization_member")
     rows = []
     for repo in repos.get_page(page - 1):
@@ -43,8 +42,8 @@ def _inspect(repository: str) -> str:
     repo = _github().get_repo(repository)
     root = repo.get_contents("")
     names = sorted(item.name + ("/" if item.type == "dir" else "") for item in root)
-    summary = [f"**Repository:** `{repo.full_name}`", f"**Default branch:** `{repo.default_branch}`", f"**Visibility:** {'private' if repo.private else 'public'}", f"**Languages:** {', '.join(f'{name} {amount} bytes' for name, amount in list(repo.get_languages().items())[:8]) or 'not detected'}", "**Root entries:** " + ", ".join(names[:30])]
-    for path, label, limit in [("AGENTS.md", "Repository instructions", 1800), ("README.md", "README overview", 2200)]:
+    summary = [f"**Repository:** `{repo.full_name}`", f"**Default branch:** `{repo.default_branch}`", f"**Visibility:** {'private' if repo.private else 'public'}", f"**Languages:** {', '.join(f'{name} {amount} bytes' for name, amount in list(repo.get_languages().items())[:8]) or 'not detected'}", "**Root entries:** " + ", ".join(names[:30])[:300]]
+    for path, label, limit in [("AGENTS.md", "Repository instructions", 500), ("README.md", "README overview", 450)]:
         try:
             item = repo.get_contents(path, ref=repo.default_branch)
             if item.encoding == "base64":
