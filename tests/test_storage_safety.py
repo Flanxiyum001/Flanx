@@ -2,6 +2,8 @@
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -9,6 +11,7 @@ from io import StringIO
 
 import usage
 import storage_admin
+import learning
 
 
 class UsageStorageTests(unittest.TestCase):
@@ -21,6 +24,12 @@ class UsageStorageTests(unittest.TestCase):
     def tearDown(self):
         self.patch.stop()
         self.temp.cleanup()
+
+    def _add_database_record(self, path, failure="safe-test"):
+        with patch.object(learning, "LESSONS_DB", path):
+            return learning.add_verified_lesson(
+                "owner/repo", failure, "root cause", "prevention", "test evidence"
+            )
 
     def test_missing_file_defaults_and_first_write(self):
         self.assertEqual(usage.get_usage()["llm"]["calls"], 0)
@@ -50,9 +59,7 @@ class UsageStorageTests(unittest.TestCase):
         prefs = os.path.join(self.temp.name, "prefs.json")
         legacy = os.path.join(self.temp.name, "legacy.json")
         usage_file = os.path.join(self.temp.name, "usage.json")
-        with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE lessons (id TEXT)")
-            conn.execute("INSERT INTO lessons VALUES ('safe-test')")
+        self._add_database_record(db)
         for path, payload in (
             (prefs, {"users": {}}),
             (legacy, {"lessons": []}),
@@ -110,9 +117,7 @@ class UsageStorageTests(unittest.TestCase):
 
     def test_backup_verification_checks_sqlite_integrity_and_counts(self):
         db = os.path.join(self.temp.name, "lessons.sqlite3")
-        with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE lessons (id TEXT)")
-            conn.execute("INSERT INTO lessons VALUES ('record-1')")
+        self._add_database_record(db, failure="record-1")
         with patch.dict(storage_admin.FILES, {
             "lessons_db": db,
             "legacy_lessons_json": os.path.join(self.temp.name, "missing.json"),
@@ -194,6 +199,178 @@ class UsageStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no source data"):
                 storage_admin.backup(destination)
             self.assertTrue(os.path.isdir(destination))
+
+
+    def test_inventory_distinguishes_missing_valid_empty_and_populated(self):
+        db = os.path.join(self.temp.name, "lessons.sqlite3")
+        prefs = os.path.join(self.temp.name, "prefs.json")
+        legacy = os.path.join(self.temp.name, "legacy.json")
+        with open(prefs, "w", encoding="utf-8") as handle:
+            json.dump({"users": {}}, handle)
+        with open(legacy, "w", encoding="utf-8") as handle:
+            json.dump({"lessons": []}, handle)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": db, "preferences": prefs,
+            "legacy_lessons_json": legacy,
+            "usage": os.path.join(self.temp.name, "missing-usage.json"),
+        }):
+            rows = {row["name"]: row for row in storage_admin.inventory()}
+            self.assertEqual(rows["lessons_db"]["status"], "missing")
+            self.assertEqual(rows["lessons_db"]["history"], "unknown")
+            self.assertFalse(rows["lessons_db"]["exists"])
+            self.assertEqual(rows["preferences"]["status"], "valid_empty")
+            self.assertEqual(rows["legacy_lessons_json"]["status"], "valid_empty")
+            self.assertEqual(rows["preferences"]["record_count"], 0)
+            self.assertEqual(len(rows["preferences"]["sha256"]), 64)
+            self._add_database_record(db)
+            rows = {row["name"]: row for row in storage_admin.inventory()}
+            self.assertEqual(rows["lessons_db"]["status"], "valid_records")
+            self.assertEqual(rows["lessons_db"]["record_count"], 1)
+            self.assertEqual(rows["lessons_db"]["sqlite_integrity"], "ok")
+
+    def test_expected_missing_store_blocks_backup_without_creating_directory(self):
+        db = os.path.join(self.temp.name, "lessons.sqlite3")
+        with patch.dict(storage_admin.FILES, {
+            name: os.path.join(self.temp.name, name + ".missing")
+            for name in storage_admin.FILES
+        }):
+            storage_admin.FILES["lessons_db"] = db
+            rows = {row["name"]: row for row in storage_admin.inventory(
+                expected_existing=["lessons_db"]
+            )}
+            self.assertEqual(rows["lessons_db"]["status"], "missing_expected")
+            destination = os.path.join(self.temp.name, "never-created")
+            with self.assertRaisesRegex(ValueError, "missing_expected"):
+                storage_admin.backup(destination, expected_existing=["lessons_db"])
+            self.assertFalse(os.path.exists(destination))
+
+    def test_inventory_corruption_invalid_path_and_inaccessible_file(self):
+        prefs = os.path.join(self.temp.name, "prefs.json")
+        with open(prefs, "wb") as handle:
+            handle.write(b'{"users":')
+        corrupt = storage_admin._inspect("preferences", prefs)
+        self.assertEqual(corrupt["status"], "corrupt")
+        self.assertTrue(corrupt["exists"])
+        self.assertNotIn("sha256", corrupt)
+        directory = storage_admin._inspect("lessons_db", self.temp.name)
+        self.assertEqual(directory["status"], "invalid_path")
+        invalid_parent = storage_admin._inspect(
+            "lessons_db", os.path.join(self.temp.name, "nonexistent", "lessons.sqlite3")
+        )
+        self.assertEqual(invalid_parent["status"], "invalid_path")
+        original = storage_admin.Path.lstat
+
+        def unreadable(path, *args, **kwargs):
+            if str(path) == prefs:
+                raise PermissionError("simulated denial")
+            return original(path, *args, **kwargs)
+
+        with patch.object(storage_admin.Path, "lstat", unreadable):
+            self.assertEqual(
+                storage_admin._inspect("preferences", prefs)["status"], "inaccessible"
+            )
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "no.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "no-legacy.json"),
+            "preferences": prefs,
+            "usage": os.path.join(self.temp.name, "no-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "reject-backup")
+            with self.assertRaisesRegex(ValueError, "preflight failed"):
+                storage_admin.backup(destination)
+            self.assertFalse(os.path.exists(destination))
+            with open(prefs, "rb") as handle:
+                self.assertEqual(handle.read(), b'{"users":')
+
+    def test_sqlite_corrupt_and_wrong_schema_fail_closed(self):
+        bad = os.path.join(self.temp.name, "bad.sqlite3")
+        with open(bad, "wb") as handle:
+            handle.write(b"not a sqlite file")
+        self.assertEqual(storage_admin._inspect("lessons_db", bad)["status"], "corrupt")
+        os.unlink(bad)
+        with sqlite3.connect(bad) as conn:
+            conn.execute("CREATE TABLE lessons (id TEXT)")
+        self.assertEqual(storage_admin._inspect("lessons_db", bad)["status"], "corrupt")
+        with sqlite3.connect(bad) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0], 0)
+
+    def test_configured_environment_paths_override_defaults(self):
+        prefs = os.path.join(self.temp.name, "persistent-data", "prefs.json")
+        os.mkdir(os.path.dirname(prefs))
+        with open(prefs, "w", encoding="utf-8") as handle:
+            json.dump({"users": {}}, handle)
+        with patch.dict(os.environ, {"FLANX_PREFS_FILE": prefs}):
+            rows = {row["name"]: row for row in storage_admin.inventory()}
+        self.assertEqual(rows["preferences"]["path"], prefs)
+        self.assertEqual(rows["preferences"]["status"], "valid_empty")
+
+    def test_valid_empty_databases_count_as_recoverable_files(self):
+        db = os.path.join(self.temp.name, "empty.sqlite3")
+        with sqlite3.connect(db) as conn:
+            conn.execute(learning._SCHEMA)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": db,
+            "legacy_lessons_json": os.path.join(self.temp.name, "missing.json"),
+            "preferences": os.path.join(self.temp.name, "missing-prefs.json"),
+            "usage": os.path.join(self.temp.name, "missing-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "backup")
+            manifest = storage_admin.backup(destination)
+            self.assertEqual(manifest["files"][0]["record_count"], 0)
+            self.assertEqual(storage_admin.verify_backup(destination)["files_verified"], 1)
+
+    def test_verify_backup_rejects_incomplete_manifest_and_extra_file(self):
+        prefs = os.path.join(self.temp.name, "prefs.json")
+        with open(prefs, "w", encoding="utf-8") as handle:
+            json.dump({"users": {}}, handle)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "absent.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "absent.json"),
+            "preferences": prefs,
+            "usage": os.path.join(self.temp.name, "absent-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "backup")
+            manifest = storage_admin.backup(destination)
+            with open(os.path.join(destination, "unexpected.txt"), "w") as handle:
+                handle.write("unrelated file")
+            with self.assertRaisesRegex(ValueError, "Unexpected files"):
+                storage_admin.verify_backup(destination)
+            os.unlink(os.path.join(destination, "unexpected.txt"))
+            manifest["complete"] = False
+            with open(os.path.join(destination, "manifest.json"), "w") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                storage_admin.verify_backup(destination)
+
+    def test_state_survives_fresh_process_with_configured_directory(self):
+        persistent = os.path.join(self.temp.name, "simulated-volume")
+        os.mkdir(persistent)
+        state_env = dict(os.environ)
+        state_env.update({
+            "MAX_LESSONS_DB": os.path.join(persistent, "lessons.sqlite3"),
+            "FLANX_PREFS_FILE": os.path.join(persistent, "preferences.json"),
+            "FLANX_USAGE_FILE": os.path.join(persistent, "usage.json"),
+        })
+        first = (
+            "import learning,prefs,usage; "
+            "learning.add_verified_lesson('owner/repo','first','root','prevent','evidence'); "
+            "prefs.set_pref(9,'timezone','UTC'); prefs.add_note(9,'note'); "
+            "usage.record_llm_usage('model',{'prompt_tokens':2,'completion_tokens':3})"
+        )
+        second = (
+            "import learning,prefs,usage; "
+            "assert len(learning.list_verified_lessons('owner/repo'))==1; "
+            "assert prefs.get_pref(9,'timezone')=='UTC'; "
+            "assert prefs.list_notes(9)==['note']; "
+            "assert usage.get_usage()['llm']['total_tokens']==5"
+        )
+        root = os.path.dirname(os.path.dirname(__file__))
+        for script in (first, second):
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=root, env=state_env,
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
