@@ -77,14 +77,14 @@ Repository discovery is read-only. The token can only list repositories permitte
 - `!flanx_brain <owner/repo>` — print what Flanx remembers for that repository
 - `!flanx_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
-All of these also work as plain chat (`flanx …` / `@Flanx …`) — see **Chat mode** below.
+The legacy `!flanx_*` commands remain available; for plain chat use `max …` or mention `@Max` — see **Chat mode** below.
 
 ## Chat mode (no prefix needed)
 
 Talk to Max in plain chat — it answers when you **mention it** (`@Max …`) or start a
-message with the word `max` (case-insensitive; `hi max`, `hey max`, and `max,` work). The old `flanx` trigger remains a backward-compatible alias:
+message with the word `max` (case-insensitive; `hi max`, `hey max`, `hello max`, and `max,` work). The old `flanx` trigger remains a backward-compatible alias:
 
-| You type | Flanx does |
+| You type | Max does |
 | --- | --- |
 | `max help me with src/app.js in owner/repo — add retry logic` | runs the full `!flanx_fix` repair pipeline |
 | `@Max fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
