@@ -26,6 +26,7 @@ from typing import Optional
 
 import requests
 from github import Github, GithubException, UnknownObjectException
+from repo_review import _redact_review_excerpt
 
 SANDBOX_BASE_URL = os.getenv("ONLINE_COMPILER_BASE_URL", "https://api.onlinecompiler.io").rstrip("/")
 SANDBOX_API_KEY = os.getenv("ONLINE_COMPILER_API_KEY")
@@ -251,7 +252,7 @@ def read_flanx_brain(repo_name: str, ref: str = "main") -> str:
         content = file_obj.decoded_content.decode("utf-8", errors="replace")
         if len(content) > BRAIN_MAX_CHARS:
             content = "…[older memories trimmed]…" + content[-BRAIN_MAX_CHARS:]
-        return content
+        return _redact_review_excerpt(content)
     except UnknownObjectException:
         return "No memory file found on that branch; historical existence is unknown."
     except Exception:  # never let memory trouble kill a run
