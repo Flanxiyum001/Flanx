@@ -26,7 +26,6 @@ class PreferenceStorageError(RuntimeError):
     """Raised when existing preference data cannot be read safely."""
 
 
-
 def _empty() -> dict:
     return {"users": {}}
 
