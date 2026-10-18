@@ -32,25 +32,26 @@ gateway never stalls.
 
 ## Repository review and safe repair
 
-- \`max https://github.com/owner/repo\` asks which action you want.
-- \`max review https://github.com/owner/repo\` fetches actual GitHub metadata,
+- `max https://github.com/owner/repo` asks which action you want.
+- `max review https://github.com/owner/repo` fetches actual GitHub metadata,
   a bounded directory tree, and a sample of README/configuration/source/test files.
   It reports **only inspected evidence**; no target files are modified.
-- \`max analyze this repository's architecture: owner/repo\` uses the same
+- `max analyze this repository's architecture: owner/repo` uses the same
   read-only inspection path.
 - All GitHub-backed commands (including read-only repository review) require the
   operator Discord ID to appear in `MAX_GITHUB_ALLOWED_USER_IDS`. Do not enable
   these commands for all members of a server. Restrict repository token permissions
   to the minimum repositories and actions needed.
-- Private repositories are not automatically passed to an AI model for review.
-  The bot can confirm metadata access, but full private-code review is blocked
-  pending an explicitly approved secure process.
-- \`max fix src/app.py in owner/repo: handle invalid input\` requests a change
+- Private repositories are **not** automatically passed to the AI gateway or
+  OnlineCompiler. The bot can confirm metadata access, but private-source
+  review, automatic repair, and Discord brain-file display are blocked by
+  default pending a separately approved secure process.
+- `max fix src/app.py in owner/repo: handle invalid input` requests a change
   on a dedicated branch. A valid target path and explicit edit intent are required.
   Automatic sandbox smoke checks are limited to documented standalone
-  \`.py\`, \`.js\`, \`.ts\`, \`.go\`, and \`.rb\` executions. JavaScript
+  `.py`, `.js`, `.ts`, `.go`, and `.rb` executions. JavaScript
   uses Deno (not Node.js), so Node-specific APIs may not work. Imports, application
-  integration and CI need independent review. Use \`!update_repo\` for other
+  integration and CI need independent review. Use `!update_repo` for other
   file types or larger repository-wide changes.
 
 AI gateway responses and sandbox HTTP errors are categorized without exposing
