@@ -109,6 +109,7 @@ def backup(destination: str) -> dict:
                 extra = {"sqlite_integrity": check, "lesson_count": count}
             else:
                 shutil.copy2(source, output)
+                _validate_json(name, output)
                 if _sha256(source) != _sha256(output):
                     raise IOError(f"Backup checksum mismatch for {source}")
                 extra = {"sha256": _sha256(output)}
