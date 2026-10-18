@@ -330,6 +330,15 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("malformed", reply.lower())
 
 
+    async def test_private_review_returns_metadata_only(self):
+        evidence = {
+            "name": "owner/repo", "private": True, "branch": "main",
+            "files": [], "truncated": False, "context": "metadata only"
+        }
+        reply = await main.generate_review_reply(evidence, "review")
+        self.assertIn("did not send", reply)
+
+
 class DiscordFormattingTests(unittest.TestCase):
     def test_multichunk_prose_never_exceeds_limit(self):
         chunks = main.discord_chunks("paragraph\n" * 1000)
@@ -344,14 +353,6 @@ class DiscordFormattingTests(unittest.TestCase):
         self.assertTrue(all(len(chunk) <= 1900 for chunk in chunks))
         self.assertTrue(all(chunk.count(fence) % 2 == 0 for chunk in chunks))
 
-
-    async def test_private_review_returns_metadata_only(self):
-        evidence = {
-            "name": "owner/repo", "private": True, "branch": "main",
-            "files": [], "truncated": False, "context": "metadata only"
-        }
-        reply = await main.generate_review_reply(evidence, "review")
-        self.assertIn("did not send", reply)
 
 
 if __name__ == "__main__":
