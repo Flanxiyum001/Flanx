@@ -254,6 +254,11 @@ def backup(destination: str, *, expected_existing=()) -> dict:
                 with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as src:
                     with sqlite3.connect(output) as dst:
                         src.backup(dst)
+                        # The online snapshot can inherit WAL journal mode. Make
+                        # the COPY self-contained without altering the source.
+                        mode = dst.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+                        if mode != "delete":
+                            raise ValueError("Cannot finalize standalone SQLite backup")
                 details = _sqlite_details(output)
             else:
                 shutil.copy2(source, output)
@@ -284,6 +289,8 @@ def backup(destination: str, *, expected_existing=()) -> dict:
 def verify_backup(directory: str) -> dict:
     """Verify backed-up copies only; never read production source paths."""
     target = Path(directory).resolve()
+    if (target / "manifest.json").is_symlink():
+        raise ValueError("Backup manifest must not be a symlink")
     with (target / "manifest.json").open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     if (not isinstance(manifest, dict)
