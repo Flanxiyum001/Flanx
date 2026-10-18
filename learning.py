@@ -288,10 +288,7 @@ def export_json(destination, *, overwrite=False):
             os.replace(temporary, destination)
         else:
             # Exclusive creation avoids overwriting even when two exports race.
-            with open(destination, "xb") as out, open(temporary, "rb") as src:
-                out.write(src.read())
-                out.flush()
-                os.fsync(out.fileno())
+            os.link(temporary, destination)
         return len(records)
     except (OSError, UnicodeError) as exc:
         raise LessonStorageError(f"Cannot write export {destination!r}: {exc}") from exc
