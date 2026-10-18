@@ -54,6 +54,33 @@ class UsageStorageTests(unittest.TestCase):
         with open(self.path, "rb") as handle:
             self.assertEqual(handle.read(), original)
 
+    def test_nested_usage_corruption_fails_closed_without_reset(self):
+        for payload in (
+            {"llm": {"calls": "many"}, "sandbox": {}},
+            {"llm": {"cost_usd": "private"}, "sandbox": {}},
+            {"llm": {"by_model": {"model": None}}, "sandbox": {}},
+            {"llm": {}, "sandbox": {"2026-10": {"runs": -1}}},
+        ):
+            with self.subTest(payload=payload):
+                original = json.dumps(payload).encode("utf-8")
+                with open(self.path, "wb") as handle:
+                    handle.write(original)
+                with self.assertRaises(usage.UsageStorageError):
+                    usage.record_llm_usage("test", {"prompt_tokens": 1})
+                with open(self.path, "rb") as handle:
+                    self.assertEqual(handle.read(), original)
+
+    def test_interrupted_usage_write_preserves_original(self):
+        usage.record_llm_usage("model", {"prompt_tokens": 1})
+        with open(self.path, "rb") as handle:
+            original = handle.read()
+        with patch.object(usage.os, "replace", side_effect=PermissionError("denied")):
+            with self.assertRaises(usage.UsageStorageError):
+                usage.record_llm_usage("model", {"prompt_tokens": 2})
+        with open(self.path, "rb") as handle:
+            self.assertEqual(handle.read(), original)
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
     def test_backup_json_and_sqlite_without_modifying_sources(self):
         db = os.path.join(self.temp.name, "lessons.sqlite3")
         prefs = os.path.join(self.temp.name, "prefs.json")
