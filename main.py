@@ -340,6 +340,7 @@ CHAT_HELP = (
     "👋 **Max chat mode** — just talk to me, no prefix needed:\n"
     "• `max help me with src/app.js in owner/repo — <what to change>`\n"
     "• `@Max fix src/app.js in owner/repo: <what to change>`\n"
+    "• `max review https://github.com/owner/repo` — evidence-backed overview\n"
     "• `max search <query> for me`\n"
     "• `max what do you remember about owner/repo`\n"
     "• `max stats` — token usage, estimated cost and sandbox quota\n"
@@ -367,7 +368,13 @@ FILE_EXT_PATTERN = (
     r"sh|c|cpp|h|cs|swift|kt|txt|toml|ini|cfg"
 )
 FILE_PATH_RE = re.compile(rf"\b[\w][\w./-]*\.(?:{FILE_EXT_PATTERN})\b", re.IGNORECASE)
-REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
+# A repo URL is not a file path; URL/owner/repo parsing lives in repo_review.
+REVIEW_RE = re.compile(
+    r"^\s*(?:(?:can|could)\s+you\s+|please\s+)?"
+    r"(?:review|inspect|audit|analy[sz]e|examine|evaluate|overview|"
+    r"tell\s+me\s+about|look\s+at)\b",
+    re.IGNORECASE,
+)
 CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|hi|hello|yo|oi)\s+)?(?:max|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
 MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
@@ -426,16 +433,14 @@ def _strip_name_trigger(text: str) -> "str | None":
 
 
 def _extract_repo(text: str) -> "str | None":
-    """First owner/repo token that is not a file path like src/app.py."""
-    for owner, name in REPO_RE.findall(text):
-        if re.fullmatch(FILE_EXT_PATTERN, name.rsplit(".", 1)[-1], re.IGNORECASE):
-            continue  # a file path, not a repository
-        return f"{owner}/{name}"
-    return None
+    """Extract a normalized owner/repo or GitHub URL without taking a file path."""
+    return extract_repository(text)
 
 
 def _extract_file(text: str) -> "str | None":
-    match = FILE_PATH_RE.search(text or "")
+    # A GitHub URL must not supply a candidate file path.
+    without_urls = REPO_URL_RE.sub(" ", text or "")
+    match = FILE_PATH_RE.search(without_urls)
     return match.group(0) if match else None
 
 
@@ -487,12 +492,20 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "thanks", {}
     if GREETING_RE.match(stripped):
         return "greeting", {"text": stripped}
-    if MEMORY_RE.search(stripped):
-        return "brain", {"repo": _extract_repo(stripped) or default_repo}
     if HELP_RE.match(stripped):
         return "help", {}
     repo = _extract_repo(stripped)
     file_path = _extract_file(stripped)
+    # Repository-level work must not be treated as a request to edit a file.
+    if REVIEW_RE.match(stripped):
+        return "review", {"repo": repo or default_repo, "prompt": (text or "").strip()}
+    if repo and (
+        stripped == repo or
+        (REPO_URL_RE.fullmatch(stripped.rstrip("/")) is not None)
+    ):
+        return "repo_clarify", {"repo": repo}
+    if MEMORY_RE.search(stripped):
+        return "brain", {"repo": repo or default_repo}
     # Error reports and troubleshooting questions belong in ordinary chat, even if a
     # pasted log or diagnostic checklist happens to mention a file path. Only preserve
     # repair routing when the user explicitly requests a change and supplies both a
@@ -502,10 +515,9 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     ):
         # Preserve question marks/punctuation in the conversational request.
         return "general", {"prompt": (text or "").strip()}
-    # Only enter the code-repair workflow when the user gives a repair/update verb,
-    # a repository, or a file path. Ordinary questions should receive an answer.
-    if not (repo or file_path or FIX_VERB_RE.match(stripped)):
-        return "general", {"prompt": stripped}
+    # Never infer permission to edit from merely mentioning a repository/path.
+    if not FIX_VERB_RE.match(stripped):
+        return "general", {"prompt": (text or "").strip()}
     return "fix", {
         "repo": repo or default_repo,
         "file": file_path,
