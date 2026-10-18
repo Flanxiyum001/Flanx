@@ -11,8 +11,9 @@ The provider documents 30 submissions/minute, 2 concurrent executions,
 and **no outbound network inside the sandbox**. Check account quota via
 /api/usage/ because published monthly-limit pages have differed.
 
-The brain lives in ``brain_memory.txt`` inside the repository Flanx works on,
-so every lesson survives restarts and is reviewable in GitHub history.
+Legacy brain notes may exist in ``brain_memory.txt`` in a target
+repository. Automatic default-branch writes are disabled; persistence of
+lesson records is managed separately in SQLite.
 """
 
 from __future__ import annotations
@@ -267,13 +268,18 @@ def update_flanx_brain(
     if ref in {"main", "master"}:
         print("⚠️ Refusing to commit brain memory directly to a default branch.")
         return False
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    entry = f"- [{stamp}] {new_insight}"
     try:
         repo = _client().get_repo(repo_name)
     except Exception:
         print("⚠️ Brain update warning (repository unavailable).")
         return False
+    # A repository may name its protected default branch something other than
+    # main/master. Never bypass approval by writing directly to that branch.
+    if ref == repo.default_branch:
+        print("⚠️ Refusing to commit brain memory directly to the default branch.")
+        return False
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    entry = f"- [{stamp}] {new_insight}"
 
     for attempt in range(max_retries):
         try:
