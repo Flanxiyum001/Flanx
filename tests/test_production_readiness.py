@@ -238,6 +238,35 @@ class GitHubAccessControlTests(unittest.TestCase):
         self.assertNotIn("Root entries", result)
 
 
+class RuntimeSelectionTests(unittest.TestCase):
+    def test_compilers_are_documented_onlinecompiler_ids(self):
+        expected = {
+            "example.py": "python-3.14",
+            "src/app.ts": "typescript-deno",
+            "src/app.js": "typescript-deno",
+            "main.go": "go-1.26",
+            "app.rb": "ruby-4.0",
+        }
+        for filename, compiler in expected.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(main.compiler_for_target(filename), compiler)
+        self.assertIsNone(main.compiler_for_target("script.sh"))
+
+    def test_local_sandbox_usage_never_claims_live_quota(self):
+        import usage
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        with TemporaryDirectory() as folder:
+            with patch.object(usage, "USAGE_FILE", str(Path(folder) / "usage.json")):
+                with patch.object(usage, "SANDBOX_MONTHLY_QUOTA", 0):
+                    text = usage.format_usage()
+                    self.assertIn("live provider allowance not checked", text)
+                with patch.object(usage, "SANDBOX_MONTHLY_QUOTA", 100):
+                    text = usage.format_usage()
+                    self.assertIn("estimated remaining", text)
+                    self.assertNotIn("left on the free plan", text)
+
+
 class SandboxHTTPTests(unittest.TestCase):
     def setUp(self):
         self.key = patch.object(free_sandbox, "SANDBOX_API_KEY", "test-key-for-mocks")
