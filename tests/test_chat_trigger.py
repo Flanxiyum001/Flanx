@@ -1,6 +1,6 @@
 import unittest
 
-from main import _strip_name_trigger, chat_intent
+from main import DIAGNOSTIC_RE, _strip_name_trigger, chat_intent
 
 
 class MaxChatTriggerTests(unittest.TestCase):
@@ -31,6 +31,38 @@ class MaxChatTriggerTests(unittest.TestCase):
                 intent, payload = chat_intent(message)
                 self.assertEqual(intent, "general")
                 self.assertEqual(payload["prompt"], message)
+
+    def test_diagnostic_patterns_actually_match(self):
+        messages = (
+            "what does this error mean",
+            "why is the sandbox broken",
+            "diagnose the API issue",
+            "investigate the connection failure",
+            "troubleshoot status code 405",
+            "Matrix exception: Error code: 405",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertIsNotNone(DIAGNOSTIC_RE.search(message))
+
+    def test_diagnostics_with_repository_and_file_are_not_repairs(self):
+        messages = (
+            "Why did owner/repo src/app.py raise HTTP 405?",
+            "explain the failure in src/app.py in owner/repo",
+            "The API connection error mentions owner/repo and src/app.py.",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                intent, payload = chat_intent(message)
+                self.assertEqual(intent, "general")
+                self.assertEqual(payload["prompt"], message)
+
+    def test_diagnostic_request_keeps_question_mark_and_whitespace_normalization(self):
+        message = "  what does error code 405 mean?  "
+        self.assertEqual(
+            chat_intent(message),
+            ("general", {"prompt": "what does error code 405 mean?"}),
+        )
 
     def test_explicit_file_repair_still_routes_to_fix(self):
         intent, payload = chat_intent(
