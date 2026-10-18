@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio, os, re
 from github import Github, GithubException
 from prefs import get_pref, set_pref
+from authz import GITHUB_ACCESS_DENIED, github_user_allowed
 NAME = "repos"
 DESCRIPTION = "list accessible GitHub repos, choose a default, and inspect project instructions"
 USAGE = ["flanx repos", "flanx use owner/repo", "flanx current repo", "flanx inspect owner/repo"]
@@ -40,6 +41,11 @@ def _list_repos(page: int) -> tuple[list[dict], bool]:
 
 def _inspect(repository: str) -> str:
     repo = _github().get_repo(repository)
+    if repo.private:
+        return (
+            f"**Repository:** `{repo.full_name}` (private). Metadata access confirmed; "
+            "contents are not displayed in Discord by default."
+        )
     root = repo.get_contents("")
     names = sorted(item.name + ("/" if item.type == "dir" else "") for item in root)
     summary = [f"**Repository:** `{repo.full_name}`", f"**Default branch:** `{repo.default_branch}`", f"**Visibility:** {'private' if repo.private else 'public'}", f"**Languages:** {', '.join(f'{name} {amount} bytes' for name, amount in list(repo.get_languages().items())[:8]) or 'not detected'}", "**Root entries:** " + ", ".join(names[:30])[:300]]
@@ -57,6 +63,8 @@ def _inspect(repository: str) -> str:
     return "\n\n".join(summary)[:1800]
 
 async def handle(event, payload: dict) -> str:
+    if not github_user_allowed(event.author_id):
+        return GITHUB_ACCESS_DENIED
     action = payload["action"]
     if action == "current":
         selected = get_pref(event.author_id, "repo")
@@ -64,17 +72,17 @@ async def handle(event, payload: dict) -> str:
     if action == "use":
         try:
             repo = await asyncio.to_thread(_github().get_repo, payload["repository"])
-        except Exception as exc:
-            return f"Couldn't verify that repository with the configured GitHub token: {str(exc)[:220]}"
+        except Exception:
+            return "Couldn't verify repository access. Check the repository name and GitHub token permissions."
         set_pref(event.author_id, "repo", repo.full_name)
         return f"Selected `{repo.full_name}` as your personal default repository. Say `flanx current repo` to check it, or `flanx inspect {repo.full_name}` to inspect it."
     if action == "inspect":
         try: return await asyncio.to_thread(_inspect, payload["repository"])
-        except Exception as exc: return f"Repository inspection failed: {str(exc)[:300]}"
+        except Exception: return "Repository inspection failed. Check accessibility and permissions."
     try:
         rows, has_next = await asyncio.to_thread(_list_repos, payload["page"])
-    except Exception as exc:
-        return f"Couldn't list repositories: {str(exc)[:300]}"
+    except Exception:
+        return "Couldn't list repositories. Check GitHub token permissions and connectivity."
     if not rows: return f"No repositories found on page {payload['page']}. Try `flanx repos 1` or check GitHub token permissions."
     lines = [f"**Accessible GitHub repositories — page {payload['page']}**"]
     for row in rows:
