@@ -5,7 +5,7 @@ lessons, searches the live web, proves the fix inside a **free** OnlineCompiler.
 sandbox, learns from the result, and opens a pull request — all from a Discord command.
 
 ```
-!flanx_fix owner/repo src/app.py add retry logic around the HTTP call
+max fix src/app.py in owner/repo: add retry logic around the HTTP call
 ```
 
 ## Pipeline
@@ -60,9 +60,9 @@ The routing module is network-independent and can be tested with:
 
 ## GitHub repository workflows
 
-Use the chat trigger by mentioning **Max** or starting a message with `max` (the old `flanx` trigger remains supported for compatibility):
+Use Max by mentioning **@Max** or starting a message with `max`. The previous trigger remains available for backward compatibility:
 
-- `max repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `max repos 2` opens the next page. (`flanx repos` still works.)
+- `max repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `max repos 2` opens the next page. (repository commands are also available through the Max chat trigger.)
 - `max use owner/repo` — verify access and save a per-user default repository.
 - `max current repo` — show your saved repository.
 - `max inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
@@ -71,29 +71,29 @@ Repository discovery is read-only. The token can only list repositories permitte
 
 ## Commands
 
-- `!flanx_fix <owner/repo> <path/to/file.py> <what to change>` — full repair cycle
+- `max fix <path/to/file.py> in <owner/repo>: <what to change>` — run the full repair cycle
 - `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
   fresh branch for an external agent session to execute
-- `!flanx_brain <owner/repo>` — print what Max remembers for that repository
-- `!flanx_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
+- `max what do you remember about <owner/repo>` — show the repository's saved lessons
+- `max stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
-The legacy `!flanx_*` commands remain available; for plain chat use `max …` or mention `@Max` — see **Chat mode** below.
+For the recommended Max-first interface, use the plain-chat examples below. Older prefix commands remain available for backward compatibility.
 
 ## Chat mode (no prefix needed)
 
 Talk to Max in plain chat — it answers when you **mention it** (`@Max …`) or start a
-message with the word `max` (case-insensitive; `hi max`, `hey max`, `hello max`, and `max,` work). The old `flanx` trigger remains a backward-compatible alias:
+message starting with `max` (case-insensitive; `hi max`, `hey max`, `hello max`, and `max,` work). The previous trigger remains a backward-compatible alias:
 
 | You type | Max does |
 | --- | --- |
-| `max help me with src/app.js in owner/repo — add retry logic` | runs the full `!flanx_fix` repair pipeline |
+| `max help me with src/app.js in owner/repo — add retry logic` | runs the full repair pipeline |
 | `@Max fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
 | `max search python 3.14 changes for me` | live web search, results posted back |
 | `max what do you remember about owner/repo` | prints that repo's brain memory |
 | `max stats` / `max how many tokens have you used` | usage: tokens, cost, sandbox quota |
 | `hi max` / `max how are you` / `max who are you` | friendly companion replies (no fix-request nagging) |
 | `max set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
-| `max what time is it` | current time in your saved timezone (or `flanx time in America/New_York`) |
+| `max what time is it` | current time in your saved timezone (or `max time in America/New_York`) |
 | `max remember <anything>` / `max show notes` | personal notes, stored per user |
 | `max help` | usage card |
 
@@ -122,12 +122,12 @@ dormant).
 2. Fill in the contract:
    ```python
    NAME = "weather"                    # slug used by the router
-   DESCRIPTION = "current weather"     # shown by `flanx integrations`
-   USAGE = ["flanx weather in Pune"]   # example phrase
+   DESCRIPTION = "current weather"     # shown in Max's integration registry
+   USAGE = ["max weather in Pune"]      # example phrase
    def match(text: str) -> dict | None  # claim a message -> payload, else None
    async def handle(event, payload) -> str  # do the work, return the reply
    ```
-3. Restart the bot. `flanx integrations` now lists it, and any chat message its
+3. Restart Max. The integration registry now includes it, and any chat message its
    `match()` claims is routed to `handle()` — search/stats/fix intents keep priority
    over your claims only where they are checked first, so keep `match()` anchored and
    specific.
@@ -152,7 +152,7 @@ Instead of running heavy work on the Railway box, Max can **stage** it:
    manifest together with `knowledge.md`, applies the change, validates it, and opens the
    PR per the checklist.
 
-The bot also works in the other direction: `!flanx_fix` does the patching itself using
+Max also patches files directly through `max fix ...`, using
 the free OnlineCompiler.io sandbox, so nothing depends on an external trigger.
 
 > **Honest scope note:** what is verified is the Git staging (branch + manifest + GitHub
@@ -186,7 +186,7 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 
 ## Verified lessons: SQLite storage, safe migration, and rollback
 
-The `flanx lesson` and `flanx lessons` interfaces use SQLite only.
+The lesson and lessons interfaces use SQLite only.
 `MAX_LESSONS_DB` defaults to `max_lessons.sqlite3`. They **never
 automatically fall back** to `MAX_LESSONS_FILE` (`max_lessons.json`), and
 startup does not migrate or delete legacy JSON. A missing database is new
@@ -369,7 +369,7 @@ itself and are always English.
 
 ## Usage counters, cost and the retry ladder
 
-**Counters** (`!flanx_stats` or `flanx stats`) are maintained in `flanx_usage.json`
+**Counters** (use `max stats` in Discord) are maintained in `flanx_usage.json`
 (git-ignored, written atomically, thread-safe):
 
 - **LLM:** call count, prompt/completion/total tokens, per-model breakdown, and
