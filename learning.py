@@ -1,10 +1,12 @@
-"""Evidence-backed, repository-scoped lessons stored transactionally in SQLite."""
+"""Evidence-backed repository lessons with explicit, transactional SQLite migration."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 
 LESSONS_FILE = os.getenv("MAX_LESSONS_FILE", "max_lessons.json")
@@ -12,10 +14,25 @@ LESSONS_DB = os.getenv("MAX_LESSONS_DB", "max_lessons.sqlite3")
 MAX_LESSONS = 500
 MAX_FIELD_CHARS = 800
 _KEYS = ("repository", "failure", "root_cause", "prevention", "evidence")
+_COLUMNS = "id, repository, failure, root_cause, prevention, evidence, status, created_at, updated_at"
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS lessons (
+    id TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    failure TEXT NOT NULL,
+    root_cause TEXT NOT NULL,
+    prevention TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(repository COLLATE NOCASE, failure COLLATE NOCASE, root_cause COLLATE NOCASE)
+)
+"""
 
 
 class LessonStorageError(RuntimeError):
-    """Lesson storage could not be read or written safely."""
+    """A database operation failed; no success should be reported."""
 
 
 def _validate(values):
@@ -29,60 +46,69 @@ def _validate(values):
     return fields
 
 
-def _connect():
+def _signature(record):
+    return tuple(record[key].casefold() for key in ("repository", "failure", "root_cause"))
+
+
+def _connect(*, create=True):
+    """Open a connection without ever replacing an invalid existing database."""
+    connection = None
     try:
-        parent = os.path.dirname(os.path.abspath(LESSONS_DB))
-        os.makedirs(parent, exist_ok=True)
-        connection = sqlite3.connect(LESSONS_DB, timeout=30)
+        path = os.path.abspath(LESSONS_DB)
+        if create:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        elif not os.path.isfile(path):
+            raise LessonStorageError(f"Lesson database does not exist: {path!r}")
+        connection = sqlite3.connect(path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
-        connection.execute("""
-            CREATE TABLE IF NOT EXISTS lessons (
-                id TEXT PRIMARY KEY,
-                repository TEXT NOT NULL,
-                failure TEXT NOT NULL,
-                root_cause TEXT NOT NULL,
-                prevention TEXT NOT NULL,
-                evidence TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(repository COLLATE NOCASE, failure COLLATE NOCASE, root_cause COLLATE NOCASE)
-            )
-        """)
-        connection.commit()
+        if create:
+            connection.execute(_SCHEMA)
+            connection.commit()
+        else:
+            connection.execute("SELECT id FROM lessons LIMIT 1").fetchall()
         return connection
     except (sqlite3.Error, OSError) as exc:
+        if connection is not None:
+            connection.close()
         raise LessonStorageError(f"Cannot open lesson database {LESSONS_DB!r}: {exc}") from exc
+    except BaseException:
+        if connection is not None:
+            connection.close()
+        raise
 
 
-def _upsert(connection, fields, *, record=None):
-    now = datetime.now(timezone.utc).isoformat()
-    existing = connection.execute(
-        "SELECT * FROM lessons WHERE repository = ? COLLATE NOCASE AND failure = ? COLLATE NOCASE AND root_cause = ? COLLATE NOCASE",
-        (fields["repository"], fields["failure"], fields["root_cause"]),
-    ).fetchone()
-    if existing:
-        connection.execute(
-            """UPDATE lessons SET repository=?, failure=?, root_cause=?, prevention=?, evidence=?,
-               status='verified', updated_at=? WHERE id=?""",
-            (*[fields[k] for k in _KEYS], (record or {}).get("updated_at", now), existing["id"]),
-        )
-        identifier = existing["id"]
-    else:
-        import uuid
-        identifier = (record or {}).get("id") or f"lesson-{uuid.uuid4().hex}"
-        connection.execute(
-            "INSERT INTO lessons (id, repository, failure, root_cause, prevention, evidence, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (identifier, *[fields[k] for k in _KEYS], "verified",
-             (record or {}).get("created_at", now), (record or {}).get("updated_at", now)),
-        )
+def _rollback(connection, operation):
+    try:
+        connection.rollback()
+    except sqlite3.Error as exc:
+        raise LessonStorageError(f"{operation} failed; rollback ALSO failed: {exc}") from exc
+
+
+def _rows(connection):
+    return [dict(row) for row in connection.execute(f"SELECT {_COLUMNS} FROM lessons").fetchall()]
+
+
+def _verified_record(record):
+    fields = _validate(record)
+    if record.get("status") != "verified":
+        raise ValueError("status must be verified")
+    for name in ("id", "created_at", "updated_at"):
+        if not isinstance(record.get(name), str) or not record[name]:
+            raise ValueError(f"{name} must be a nonempty string")
+    # Truncation was historical behavior for commands, but migration must not
+    # silently truncate old input or introduce new signature collisions.
+    if any(record[key] != fields[key] for key in _KEYS):
+        raise ValueError("source fields must be trimmed and at most 800 characters; fix a copy")
+    return {**fields, "id": record["id"], "status": "verified",
+            "created_at": record["created_at"], "updated_at": record["updated_at"]}
+
+
+def _insert(connection, record):
     connection.execute(
-        "DELETE FROM lessons WHERE id IN (SELECT id FROM lessons ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
-        (MAX_LESSONS,),
+        f"INSERT INTO lessons ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?)",
+        tuple(record[key] for key in ("id", *_KEYS, "status", "created_at", "updated_at")),
     )
-    row = connection.execute("SELECT * FROM lessons WHERE id=?", (identifier,)).fetchone()
-    return dict(row) if row else None
 
 
 def add_verified_lesson(repository, failure, root_cause, prevention, evidence):
@@ -90,72 +116,201 @@ def add_verified_lesson(repository, failure, root_cause, prevention, evidence):
     connection = _connect()
     try:
         connection.execute("BEGIN IMMEDIATE")
-        result = _upsert(connection, fields)
+        # Python casefold covers more Unicode than SQLite's default NOCASE.
+        existing = next((row for row in _rows(connection) if _signature(row) == _signature(fields)), None)
+        now = datetime.now(timezone.utc).isoformat()
+        if existing is None:
+            record = {"id": f"lesson-{uuid.uuid4().hex}", **fields,
+                      "status": "verified", "created_at": now, "updated_at": now}
+            _insert(connection, record)
+        else:
+            record = {**existing, **fields, "status": "verified", "updated_at": now}
+            connection.execute(
+                """UPDATE lessons SET repository=?, failure=?, root_cause=?, prevention=?,
+                   evidence=?, status='verified', updated_at=? WHERE id=?""",
+                (*[fields[k] for k in _KEYS], now, existing["id"]),
+            )
+        connection.execute(
+            """DELETE FROM lessons WHERE id IN
+               (SELECT id FROM lessons ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)""",
+            (MAX_LESSONS,),
+        )
+        retained = connection.execute(f"SELECT {_COLUMNS} FROM lessons WHERE id=?", (record["id"],)).fetchone()
+        if retained is None:
+            raise LessonStorageError("New lesson was removed by retention policy; transaction cancelled")
         connection.commit()
-        return result
+        return dict(retained)
     except sqlite3.Error as exc:
-        connection.rollback()
-        raise LessonStorageError(f"Could not save verified lesson in {LESSONS_DB!r}: {exc}") from exc
+        _rollback(connection, "Saving lesson")
+        raise LessonStorageError(f"Cannot save verified lesson in {LESSONS_DB!r}: {exc}") from exc
+    except Exception:
+        _rollback(connection, "Saving lesson")
+        raise
     finally:
         connection.close()
 
 
 def list_verified_lessons(repository):
-    key = (repository or "").strip()
+    key = (repository or "").strip().casefold()
     if not key:
         return []
     connection = _connect()
     try:
-        return [dict(row) for row in connection.execute(
-            "SELECT * FROM lessons WHERE repository = ? COLLATE NOCASE AND status='verified' ORDER BY updated_at DESC",
-            (key,),
-        ).fetchall()]
+        return sorted(
+            [row for row in _rows(connection)
+             if row["repository"].casefold() == key and row["status"] == "verified"],
+            key=lambda row: row["updated_at"], reverse=True,
+        )
     except sqlite3.Error as exc:
-        raise LessonStorageError(f"Could not read verified lessons from {LESSONS_DB!r}: {exc}") from exc
+        raise LessonStorageError(f"Cannot read verified lessons from {LESSONS_DB!r}: {exc}") from exc
     finally:
         connection.close()
 
 
 def migrate_json(source=None):
-    """Explicitly import a validated legacy JSON file; never modify the source."""
+    """Import atomically without pruning, implicit overwrites, or source edits.
+
+    Exact repeated source records sharing an ID/signature are counted as skipped;
+    divergent duplicates and collisions with unrelated destination records fail.
+    """
     source = source or LESSONS_FILE
     try:
         with open(source, encoding="utf-8") as handle:
-            data = json.load(handle)
+            payload = json.load(handle)
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError(f"Cannot read migration source {source!r}: {exc}") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("lessons"), list):
-        raise ValueError("Migration source must be an object containing a lessons list")
-    records = data["lessons"]
-    validated = []
-    for index, record in enumerate(records):
+    if not isinstance(payload, dict) or not isinstance(payload.get("lessons"), list):
+        raise ValueError("Migration source must be an object with a lessons list")
+
+    source_records = payload["lessons"]
+    distinct = {}
+    ids = {}
+    source_skipped = 0
+    for index, raw in enumerate(source_records):
         try:
-            fields = _validate(record)
-            if record.get("status") != "verified":
-                raise ValueError("status must be verified")
-            for name in ("id", "created_at", "updated_at"):
-                if not isinstance(record.get(name), str) or not record[name]:
-                    raise ValueError(f"{name} must be a nonempty string")
-            validated.append((fields, record))
+            record = _verified_record(raw)
         except ValueError as exc:
             raise ValueError(f"Invalid migration record {index}: {exc}") from exc
+        signature = _signature(record)
+        prior_id = ids.get(record["id"])
+        prior_signature = distinct.get(signature)
+        if (prior_id is not None and prior_id != record) or (
+            prior_signature is not None and prior_signature != record
+        ):
+            raise ValueError(f"Conflicting source ID or signature at record {index}; correct a copy before migrating")
+        if prior_id is not None or prior_signature is not None:
+            source_skipped += 1
+            continue
+        ids[record["id"]] = record
+        distinct[signature] = record
+    if len(distinct) > MAX_LESSONS:
+        raise ValueError(f"Source has {len(distinct)} distinct lessons; maximum is {MAX_LESSONS}. "
+                         "Archive/split and reconcile a copy before migration; original unchanged")
+
     connection = _connect()
     try:
         connection.execute("BEGIN IMMEDIATE")
-        for fields, record in validated:
-            _upsert(connection, fields, record=record)
+        current = _rows(connection)
+        by_id = {row["id"]: row for row in current}
+        by_signature = {_signature(row): row for row in current}
+        if len(by_signature) != len(current):
+            raise ValueError("Destination contains case-insensitive signature collisions; resolve before migrating")
+        inserted = updated = 0
+        for signature, record in distinct.items():
+            existing_id = by_id.get(record["id"])
+            existing_signature = by_signature.get(signature)
+            if existing_id and _signature(existing_id) != signature:
+                raise ValueError(f"ID collision with different lesson: {record['id']}")
+            if existing_signature and existing_signature["id"] != record["id"]:
+                raise ValueError(f"Signature collision with different ID: {record['id']}")
+            if existing_id or existing_signature:
+                updated += 1
+            else:
+                inserted += 1
+        if len(current) + inserted > MAX_LESSONS:
+            raise ValueError(f"Migration would exceed {MAX_LESSONS}-lesson limit: "
+                             f"{len(current)} existing + {inserted} new. "
+                             "Export/backup and reconcile into an empty DB or a smaller source copy")
+        for record in distinct.values():
+            if record["id"] in by_id:
+                connection.execute(
+                    """UPDATE lessons SET repository=?, failure=?, root_cause=?, prevention=?,
+                       evidence=?, status=?, created_at=?, updated_at=? WHERE id=?""",
+                    (*[record[k] for k in _KEYS], record["status"], record["created_at"],
+                     record["updated_at"], record["id"]),
+                )
+            else:
+                _insert(connection, record)
         connection.commit()
-        return len(validated)
+        return {"source_records": len(source_records), "distinct_signatures": len(distinct),
+                "inserted": inserted, "updated": updated,
+                "skipped_identical_source_duplicates": source_skipped, "conflicting_records": 0}
     except sqlite3.Error as exc:
-        connection.rollback()
-        raise LessonStorageError(f"Migration failed; database transaction rolled back: {exc}") from exc
+        _rollback(connection, "Migration")
+        raise LessonStorageError(f"Migration failed; no rows committed: {exc}") from exc
+    except Exception:
+        _rollback(connection, "Migration")
+        raise
     finally:
         connection.close()
 
 
+def export_json(destination, *, overwrite=False):
+    """Export a consistent SQLite snapshot; refuse overwrite unless explicit.
+
+    Export does not modify SQLite. A temporary file and atomic rename protect
+    completed exports. Without overwrite, exclusive creation protects existing files.
+    """
+    connection = _connect(create=False)
+    try:
+        connection.execute("BEGIN")
+        records = _rows(connection)
+        connection.commit()
+    except sqlite3.Error as exc:
+        _rollback(connection, "Export read")
+        raise LessonStorageError(f"Cannot export lessons from {LESSONS_DB!r}: {exc}") from exc
+    finally:
+        connection.close()
+
+    if os.path.abspath(destination) == os.path.abspath(LESSONS_DB):
+        raise ValueError("Export destination must not be the SQLite database")
+    import tempfile
+    temporary = None
+    try:
+        parent = os.path.dirname(os.path.abspath(destination))
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent,
+                                         prefix=".lessons-export-", delete=False) as handle:
+            temporary = handle.name
+            json.dump({"lessons": records}, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if overwrite:
+            os.replace(temporary, destination)
+        else:
+            # Exclusive creation avoids overwriting even when two exports race.
+            with open(destination, "xb") as out, open(temporary, "rb") as src:
+                out.write(src.read())
+                out.flush()
+                os.fsync(out.fileno())
+        return len(records)
+    except (OSError, UnicodeError) as exc:
+        raise LessonStorageError(f"Cannot write export {destination!r}: {exc}") from exc
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Explicit JSON to SQLite verified-lesson migration")
-    parser.add_argument("--migrate-json", metavar="PATH", required=True)
+    parser = argparse.ArgumentParser(description="Verified lesson database maintenance")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--migrate-json", metavar="PATH")
+    mode.add_argument("--export-json", metavar="PATH")
+    parser.add_argument("--overwrite-export", action="store_true",
+                        help="Replace an existing export only after making a backup")
     args = parser.parse_args()
-    print(f"Imported or updated {migrate_json(args.migrate_json)} source records into {LESSONS_DB}")
+    if args.migrate_json:
+        if args.overwrite_export:
+            parser.error("--overwrite-export only applies to --export-json")
+        print(json.dumps(migrate_json(args.migrate_json), indent=2))
+    else:
+        print(f"Exported {export_json(args.export_json, overwrite=args.overwrite_export)} lessons to {args.export_json}")
