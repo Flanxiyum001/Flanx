@@ -52,6 +52,7 @@ def _validate_json(name: str, path: Path) -> None:
         not isinstance(value, dict) or not isinstance(value.get("lessons"), list)
     ):
         raise ValueError(f"{path}: invalid legacy lessons structure")
+    return len(value["users"]) if name == "preferences" else (len(value["lessons"]) if name == "legacy_lessons_json" else len(value["sandbox"]))
 
 
 def inventory() -> list[dict]:
@@ -67,7 +68,7 @@ def inventory() -> list[dict]:
             item["bytes"] = path.stat().st_size
             item["sha256"] = _sha256(path)
             if name.endswith("json") or name in {"preferences", "usage"}:
-                _validate_json(name, path)
+                item["record_count"] = _validate_json(name, path)
             elif name == "lessons_db":
                 with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
                     check = conn.execute("PRAGMA integrity_check").fetchone()[0]
@@ -109,10 +110,10 @@ def backup(destination: str) -> dict:
                 extra = {"sqlite_integrity": check, "lesson_count": count}
             else:
                 shutil.copy2(source, output)
-                _validate_json(name, output)
+                record_count = _validate_json(name, output)
                 if _sha256(source) != _sha256(output):
                     raise IOError(f"Backup checksum mismatch for {source}")
-                extra = {"sha256": _sha256(output)}
+                extra = {"record_count": record_count}
             manifest["files"].append({
                 "name": name, "source": str(source), "backup": filename,
                 "status": "backed_up", "bytes": output.stat().st_size,
@@ -172,7 +173,8 @@ def verify_backup(directory: str) -> dict:
             if check != "ok" or count != entry.get("lesson_count"):
                 raise ValueError("SQLite backup integrity or lesson count mismatch")
         else:
-            _validate_json(name, path)
+            if _validate_json(name, path) != entry.get("record_count"):
+                raise ValueError(f"Backup JSON record count mismatch: {name}")
         verified += 1
     if seen != expected:
         raise ValueError("Backup manifest does not cover all state files")
