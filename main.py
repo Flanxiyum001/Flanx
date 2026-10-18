@@ -865,6 +865,16 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             return
         await ctx.send(f"📡 Fetching `{file_path}` from `{repo_name}`...")
         repo = await asyncio.to_thread(gh.get_repo, repo_name)
+        # Automatic repair sends source to external providers. Never send
+        # private-repository code without a separately reviewed consent flow.
+        if repo.private:
+            await ctx.send(
+                "Private-repository automatic repair is disabled: source would "
+                "otherwise be sent to external AI and sandbox services. "
+                "No source file was retrieved or modified. Use an approved "
+                "private-code workflow instead."
+            )
+            return
         default_branch = repo.default_branch
 
         def fetch_file():
