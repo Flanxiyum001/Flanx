@@ -446,6 +446,10 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "help", {}
     repo = _extract_repo(stripped)
     file_path = _extract_file(stripped)
+    # Only enter the code-repair workflow when the user gives a repair/update verb,
+    # a repository, or a file path. Ordinary questions should receive an answer.
+    if not (repo or file_path or FIX_VERB_RE.match(stripped)):
+        return "general", {"prompt": stripped}
     return "fix", {
         "repo": repo or default_repo,
         "file": file_path,
@@ -548,6 +552,10 @@ async def on_message(message):
             else:
                 memory = await asyncio.to_thread(read_flanx_brain, repo)
                 await channel.send(f"🧠 **Brain memory for `{repo}`**\n```\n{clip(memory, 1800)}\n```")
+        elif intent == "general":
+            async with channel.typing():
+                reply = await generate_assistant_reply(payload["prompt"], task="general")
+            await channel.send(clip(reply, 1900))
         elif intent == "fix":
             repo, file_path, goal = payload["repo"], payload["file"], payload["goal"]
             missing = []
@@ -571,6 +579,33 @@ async def on_message(message):
         await channel.send(f"⚠️ **Matrix exception:** {clip(str(exc), 300)}")
 
     await bot.process_commands(message)
+
+
+async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
+    """Answer ordinary Discord questions through the configured FreeLLMAPI route."""
+    model = route_model(task, fallback=AI_MODEL)
+    if not model:
+        return "I don't have a model configured for this request yet. Please check AI_MODEL or the matching MAX_MODEL_* setting."
+    completion = await ai_client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are Max, a friendly personal AI companion. Be useful, clear, "
+                    "and honest about uncertainty. Do not claim to have taken actions "
+                    "unless a tool actually performed them. Keep answers concise unless "
+                    "the user asks for detail."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=700,
+    )
+    served_model = getattr(completion, "model", None) or model
+    if getattr(completion, "usage", None) is not None:
+        record_llm_usage(served_model, completion.usage)
+    return (completion.choices[0].message.content or "").strip() or "I couldn't produce a response that time. Try asking me again."
 
 
 async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str) -> None:
