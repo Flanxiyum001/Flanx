@@ -48,7 +48,8 @@ gateway never stalls.
 - \`max fix src/app.py in owner/repo: handle invalid input\` requests a change
   on a dedicated branch. A valid target path and explicit edit intent are required.
   Automatic sandbox smoke checks are limited to documented standalone
-  \`.py\`, \`.js\`, \`.ts\`, \`.go\`, and \`.rb\` executions; imports, application
+  \`.py\`, \`.js\`, \`.ts\`, \`.go\`, and \`.rb\` executions. JavaScript
+  uses Deno (not Node.js), so Node-specific APIs may not work. Imports, application
   integration and CI need independent review. Use \`!update_repo\` for other
   file types or larger repository-wide changes.
 
@@ -208,6 +209,7 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `AI_BASE_URL` | **yes** | Your verified, self-hosted FreeLLMAPI OpenAI-compatible URL ending in `/v1`; no public-host fallback |
 | `AI_MODEL` | no | default `auto` (only when supported by the configured gateway); select verified model via `GET /v1/models` |
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
+| `SANDBOX_MONTHLY_QUOTA` | no | optional locally configured quota estimate; not live provider usage |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
 | `FLANX_DEFAULT_REPO` | no | default `owner/repo` used by chat mode when a message omits it |
 | `FLANX_FIX_ATTEMPTS` | no | retry-ladder depth, `1`–`3` (default `2` = first try + one retry) |
@@ -366,9 +368,12 @@ commonly circulated snippet:
 - The response returns `output` / `error` / `exit_code` / `time`
   (`free_sandbox.py` also accepts the Piston-compatible `run.stdout` shape).
 
-Free plan (verified on their pricing page): 100,000 runs/month, 30 submissions/minute,
-2 concurrent executions, 30s execution timeout, 100KB code+stdin, 64KB output per stream,
-**no outbound network inside the sandbox**, no credit card.
+OnlineCompiler's technical docs describe 30 submissions/minute, 2 concurrent
+executions, 30s execution timeout, 100KB code/stdin and 64KB output per stream,
+with no outbound network. **Monthly quotas are not confirmed here:** the
+provider's technical docs and public pricing page currently show different
+allowances. Consult the account's authenticated `GET /api/usage/` endpoint and
+the current `GET /api/limits/` endpoint before relying on a free quota.
 
 Docs: <https://onlinecompiler.io/docs> · Pricing: <https://onlinecompiler.io/pricing>
 
@@ -410,8 +415,10 @@ itself and are always English.
   estimated USD cost. Cost is `$0` by design while you run on the free token pool —
   set `AI_INPUT_PRICE_PER_M` / `AI_OUTPUT_PRICE_PER_M` if you move to a paid endpoint
   (never assume a given provider or model is free without checking its account).
-- **Sandbox:** runs used this calendar month against the free plan's 100,000 quota,
-  with pass rate and remaining balance; counters reset on month rollover.
+- **Sandbox:** locally recorded attempts and outcomes for this calendar month;
+  counters reset in the monthly display. They are **not** verified provider usage.
+  Configure `SANDBOX_MONTHLY_QUOTA` only if an operator has confirmed the
+  allowance; remaining figures are explicitly labelled estimates.
 - The file must live on an attached, verified Railway volume (e.g. via
   `FLANX_USAGE_FILE`), or it may be replaced on redeployment.
 
