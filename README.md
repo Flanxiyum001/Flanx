@@ -184,61 +184,82 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `FLANX_PREFS_FILE` | no | companion preferences path (default `flanx_prefs.json`) |
 
 
-## Verified lesson storage (SQLite)
+## Verified lessons: SQLite storage, safe migration, and rollback
 
-Verified lessons use Python's built-in SQLite (no extra dependency). Set
-`MAX_LESSONS_DB` to the database filename (default `max_lessons.sqlite3`).
-`MAX_LESSONS_FILE` remains the legacy JSON migration source (default
-`max_lessons.json`). The bot **does not automatically import JSON**. The
-`flanx lesson` and `flanx lessons` commands continue to use the same syntax.
+The `flanx lesson` and `flanx lessons` interfaces use SQLite only.
+`MAX_LESSONS_DB` defaults to `max_lessons.sqlite3`. They **never
+automatically fall back** to `MAX_LESSONS_FILE` (`max_lessons.json`), and
+startup does not migrate or delete legacy JSON. A missing database is new
+empty storage; an existing invalid/unreadable SQLite file causes an error.
+The built-in `sqlite3` library requires no new dependency.
 
-**Railway durability:** create and attach a real Railway persistent volume to
-the running service, choose its actual mount path, then set `MAX_LESSONS_DB`
-to a file within that mount. For example, `/data/max_lessons.sqlite3` works
-**only if** Railway actually mounts a persistent volume at `/data`. Merely
-using an absolute path or a directory named `/data` does not guarantee
-persistence. Keep the SQLite database on a local filesystem supporting file
-locks; do not share one database across multiple replicas on a network volume.
-Set `FLANX_PREFS_FILE` to a JSON filename on that same *actual* volume
-(e.g. `/data/flanx_prefs.json`) if preferences must survive redeployments.
-Preferences remain JSON; this change does not migrate or repair them.
+**Railway volume prerequisite:** Provision and attach a *real* persistent
+volume to the service before cutover, verify the mount path and writable
+filesystem, and configure `MAX_LESSONS_DB` to a file on the mount.
+`/data/max_lessons.sqlite3` is only an example if the service really has
+a Railway volume mounted at `/data`. An absolute path or `/data` prefix
+does not prove persistence. Use one writer service against this local SQLite
+database; do not share it through an unsuitable network volume.
+Preferences remain JSON: configure `FLANX_PREFS_FILE` (for example
+`/data/flanx_prefs.json` on a verified volume) separately. This change
+does not modify `prefs.py`.
 
-**Migration checklist (stop writes while migrating):**
+**Before cutover (bot stopped, no concurrent lesson writes):**
 
-1. Identify the real JSON source via `MAX_LESSONS_FILE` and the mounted
-   destination via `MAX_LESSONS_DB`. Stop the bot or otherwise prevent lesson
-   writes during the migration and cutover. Confirm the volume is mounted and
-   writable, and back up any existing destination database separately.
-2. Back up the JSON source without modifying it:
-   `cp -p "$MAX_LESSONS_FILE" "$MAX_LESSONS_FILE.backup"`.
-   Verify the backup exists and is readable. If the file is missing, corrupt,
-   or contains invalid records, fix a **copy** before attempting migration.
-3. Run `python learning.py --migrate-json "$MAX_LESSONS_FILE"` with
-   `MAX_LESSONS_DB` set to the desired destination. The command validates
-   the whole JSON payload before importing and uses a single SQLite transaction.
-   Reruns update matching lessons rather than duplicating them. It does not
-   remove or change the source JSON.
-4. Verify counts *before* switching the bot to the new DB. For example:
-   `python -c "import json,os; p=os.environ['MAX_LESSONS_FILE']; print(len(json.load(open(p))['lessons']))"`
-   and
-   `python -c "import sqlite3,os; c=sqlite3.connect(os.environ['MAX_LESSONS_DB']); print(c.execute('SELECT COUNT(*) FROM lessons').fetchone()[0]); c.close()"`.
-   Counts can differ when the source contains duplicate signatures, when the
-   destination already contains lessons, or when the 500-lesson retention limit
-   applies; inspect representative lessons and repository scopes too.
-5. Only after verification, start the bot with `MAX_LESSONS_DB` pointing
-   at the verified mounted file. Do not remove the JSON source or its backup.
+1. Identify the original JSON file, set `MAX_LESSONS_FILE` to that file,
+   set `MAX_LESSONS_DB` to the destination on the verified Railway mount,
+   and confirm both values. Preserve independent backups of any existing
+   SQLite destination (including SQLite sidecar files if present).
+2. Back up the original JSON: `cp -p "$MAX_LESSONS_FILE" "$MAX_LESSONS_FILE.backup"`.
+   Verify the backup exists and is readable. Never modify the original to
+   resolve validation errors; work on a *copy*.
+3. Execute `python learning.py --migrate-json "$MAX_LESSONS_FILE"`.
+   Migration validates *all* source records and ID/signature collisions
+   before making import writes. It runs as a single SQLite transaction
+   without retention pruning. It reports `source_records`,
+   `distinct_signatures`, `inserted`, `updated`,
+   `skipped_identical_source_duplicates`, and `conflicting_records`.
+   Identical repeated records count as explicit skips; divergent duplicates
+   cause a clear error. Import rejects ID or signature collisions with
+   *different* destination identities rather than overwriting them.
+4. The runtime keeps at most **500** lessons. Migration refuses to run if
+   the source has more than 500 distinct signatures or if existing destination
+   records plus new imports would exceed 500. **Nothing is pruned during
+   migration.** Preserve the original backup, separately archive excess
+   lessons, then prepare and review a smaller *copy* of the source or use a
+   verified empty destination. A blocked import is not a successful migration.
+5. Inspect the migration counts. To verify the actual target:
+   `python -c "import os,sqlite3; c=sqlite3.connect(os.environ['MAX_LESSONS_DB']); print(c.execute('SELECT COUNT(*) FROM lessons').fetchone()[0]); c.close()"`.
+   Compare the count with the distinct imported records and any existing
+   destination records; allow only documented identical source duplicates.
+   Check representative `owner/repo` scopes and evidence content, and
+   ensure the original JSON backup is untouched. Only then start the bot
+   using `MAX_LESSONS_DB` on the actual persistent volume.
 
-**Rollback:** stop lesson writes, preserve a copy of the SQLite database,
-and restore the previously backed-up JSON file and previous application
-revision/configuration if returning to the JSON-only implementation.
-**New lessons written to SQLite after cutover are not automatically exported
-to JSON**; reconcile them manually before rollback to avoid losing learning.
-If migration fails, the original JSON is unchanged and the transaction rolls
-back; investigate the error rather than starting with an empty DB.
+**Export and rollback (stop writes first):** Export the complete current
+SQLite state to a **new** legacy-format JSON file, read-only against SQLite:
 
-SQLite write contention waits up to 30 seconds before reporting a storage
-error. SQLite protects individual transactions but does not substitute for
-Railway volume provisioning, backup policy, or single-instance coordination.
+```sh
+python learning.py --export-json /safe-backup/max-lessons-from-sqlite.json
+```
+
+The command refuses an existing destination and never overwrites the
+SQLite database. Back up the destination first and specify
+`--overwrite-export` **only if** replacing that file is intentional.
+Verify the exported `lessons` count and representative records. To roll
+back to the older JSON-only code, stop the bot, back up SQLite, and
+**explicitly place the verified latest export at the exact
+`MAX_LESSONS_FILE` path** used by the older revision (after separately
+backing up the prior JSON there). Then revert the application revision
+and its storage configuration. Restoring older code and an old JSON
+backup alone **will lose lessons added since cutover**. Do not restart
+older code until the export and file placement are verified.
+
+SQLite serializes writers using `BEGIN IMMEDIATE` and a 30-second busy
+timeout. Connection errors, malformed databases, failed writes, and
+migration conflicts surface as errors rather than empty history. This
+provides transaction safety, not verified Railway durability, backups,
+or compatibility with multi-replica deployments.
 
 ## Setup
 
