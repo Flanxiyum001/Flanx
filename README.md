@@ -26,6 +26,26 @@ sandbox, learns from the result, and opens a pull request — all from a Discord
 All blocking work (PyGithub, sandbox HTTP, web search) runs in threads so the Discord
 gateway never stalls.
 
+## Project Max model routing
+
+Max supports task-specific model/profile identifiers through the existing OpenAI-compatible
+FreeLLMAPI gateway. The current `AI_MODEL` setting remains the compatibility fallback.
+Configure task profiles only after verifying they exist in your FreeLLMAPI dashboard:
+
+- `MAX_MODEL_CHAT` — casual conversation
+- `MAX_MODEL_GENERAL` — general questions and planning
+- `MAX_MODEL_RESEARCH` — research and synthesis
+- `MAX_MODEL_CODING` — code generation and debugging
+- `MAX_MODEL_REVIEW` — code review and verification
+
+Each value may be a model ID or a gateway routing profile accepted by your FreeLLMAPI
+instance (for example, a configured `auto:coding` profile). Unset values fall back to
+`AI_MODEL`; no new API keys are required. Set `AI_BASE_URL` to the self-hosted gateway
+URL and keep `AI_API_KEY` as a Railway secret. Do not put credentials in source control.
+
+The routing module is network-independent and can be tested with:
+`python -m unittest discover -s tests -v`.
+
 ## Files
 
 | File | Purpose |
