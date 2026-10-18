@@ -142,6 +142,17 @@ def inspect_repository(client, identifier: str) -> dict:
     full_name = normalize_repository(identifier)
     repository = client.get_repo(full_name)
     branch = repository.default_branch
+    if bool(repository.private):
+        # Private tree paths can reveal internal architecture. Do not even
+        # fetch them into the Discord process without a separate approved flow.
+        return {
+            "name": repository.full_name, "branch": branch, "private": True,
+            "files": [], "failed": [], "truncated": False,
+            "context": (
+                f"Private GitHub repository {repository.full_name} on {branch}; "
+                "metadata access only. No tree or source contents retrieved."
+            ),
+        }
     tree = repository.get_git_tree(branch, recursive=True)
     entries = list(tree.tree)
     file_paths = [
@@ -161,16 +172,6 @@ def inspect_repository(client, identifier: str) -> dict:
     ]
     inspected, failed = [], []
     budget = MAX_CONTENT_CHARS
-    # Never send private code to an external LLM implicitly.
-    if bool(repository.private):
-        summary.append(
-            "Private repository: file contents withheld from AI summarization by default."
-        )
-        return {
-            "name": repository.full_name, "branch": branch, "private": True,
-            "files": [], "failed": [], "truncated": bool(getattr(tree, "truncated", False)),
-            "context": "\n".join(summary)[:MAX_CONTENT_CHARS],
-        }
     for path in _candidate_files(file_paths):
         if budget < 200:
             break
