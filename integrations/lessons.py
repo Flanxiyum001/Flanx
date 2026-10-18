@@ -21,36 +21,59 @@ def match(text: str) -> dict | None:
         return {"action": "list", "repository": listing.group(1)}
     return None
 
+LIMIT = 2000
+
+
+def _safe(value, limit):
+    """Keep text inside a code-free single line without broken Markdown."""
+    return str(value).replace("\\", "\\\\").replace("`", "'").replace("\n", " ").replace("\r", " ")[:limit]
+
+
+def _reply_prefix(repository):
+    return _safe(repository, 150)
+
+
 async def handle(event, payload: dict) -> str:
     if payload["action"] == "invalid":
         return "Use `flanx lesson owner/repo | failure | root cause | prevention | evidence`. Only record a lesson after verifying the root cause; never include secrets."
     if payload["action"] == "add":
         try:
-            lesson = add_verified_lesson(payload["repository"], payload["failure"], payload["root_cause"], payload["prevention"], payload["evidence"])
+            lesson = add_verified_lesson(payload["repository"], payload["failure"], payload["root_cause"],
+                                         payload["prevention"], payload["evidence"])
         except (ValueError, LessonStorageError) as exc:
-            return f"Couldn't save that lesson: {exc}."
-        return f"Saved verified lesson for `{lesson['repository']}`.\n**Prevention:** {lesson['prevention']}\n**Evidence:** {lesson['evidence']}"[:2000]
+            return f"Couldn't save that lesson: {_safe(exc, 350)}."
+        header = f"Saved verified lesson for `{_reply_prefix(lesson['repository'])}`."
+        prevention = f"**Prevention:** {_safe(lesson['prevention'], 800)}"
+        evidence = f"**Evidence:** {_safe(lesson['evidence'], 800)}"
+        # Deliberately budget sections; no last-minute slicing of Markdown.
+        sections = [header, prevention, evidence]
+        assert len("\n".join(sections)) <= LIMIT
+        return "\n".join(sections)
     try:
         lessons = list_verified_lessons(payload["repository"])
     except LessonStorageError as exc:
-        return f"Couldn't read verified lessons: {str(exc)[:250]}"
+        return f"Couldn't read verified lessons: {_safe(exc, 350)}."
     if not lessons:
-        return f"No verified lessons stored for `{payload['repository']}` yet."
-    lines = [f"**Verified lessons for `{payload['repository'][:150]}`**"]
-    total_chars = len(lines[0])
-    shown = 0
+        return f"No verified lessons stored for `{_reply_prefix(payload['repository'])}` yet."
+    header = f"**Verified lessons for `{_reply_prefix(payload['repository'])}`**"
+    lines = [header]
     for index, lesson in enumerate(lessons, 1):
         entry = (
-            f"{index}. **Failure:** {lesson['failure'][:180]}\n"
-            f"   **Root cause:** {lesson['root_cause'][:180]}\n"
-            f"   **Prevention:** {lesson['prevention'][:180]}\n"
-            f"   **Evidence:** {lesson['evidence'][:180]}"
+            f"{index}. **Failure:** {_safe(lesson['failure'], 180)}\n"
+            f"   **Root cause:** {_safe(lesson['root_cause'], 180)}\n"
+            f"   **Prevention:** {_safe(lesson['prevention'], 180)}\n"
+            f"   **Evidence:** {_safe(lesson['evidence'], 180)}"
         )
-        if total_chars + len(entry) + 1 > 1750:
+        remaining = len(lessons) - index
+        notice = f"Showing {index} of {len(lessons)} lessons; {remaining} omitted." if remaining else ""
+        candidate = "\n".join(lines + [entry] + ([notice] if notice else []))
+        if len(candidate) > LIMIT:
             break
         lines.append(entry)
-        total_chars += len(entry) + 1
-        shown += 1
+    shown = len(lines) - 1
     if shown < len(lessons):
-        lines.append(f"Showing {shown} of {len(lessons)} lessons; review these before requesting the list again.")
-    return "\n".join(lines)[:2000]
+        notice = f"Showing {shown} of {len(lessons)} lessons; {len(lessons) - shown} omitted."
+        # Header is <= 180 characters and notice <= 80; entry budgeting
+        # reserves the complete notice before accepting each entry.
+        lines.append(notice)
+    return "\n".join(lines)
