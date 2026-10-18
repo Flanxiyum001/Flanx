@@ -229,6 +229,15 @@ class GitHubAccessControlTests(unittest.TestCase):
         read.assert_not_called()
         write.assert_not_called()
 
+    def test_private_github_brain_does_not_read_source(self):
+        client = MagicMock()
+        repository = client.get_repo.return_value
+        repository.private = True
+        with patch.object(free_sandbox, "_client", return_value=client):
+            result = free_sandbox.read_flanx_brain("owner/private")
+        self.assertIn("Private repository memory", result)
+        repository.get_contents.assert_not_called()
+
     def test_private_repo_inspection_never_fetches_source_contents(self):
         repo = SimpleNamespace(full_name="owner/private", private=True)
         client = SimpleNamespace(get_repo=lambda identifier: repo)
@@ -351,6 +360,19 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
             reply = await main.generate_assistant_reply("hello")
         self.assertIn("401", reply)
         self.assertNotIn("PRIVATE-KEY", reply)
+
+    async def test_private_repair_does_not_fetch_source_or_call_external_services(self):
+        ctx = SimpleNamespace(send=AsyncMock())
+        private_repo = MagicMock()
+        private_repo.private = True
+        with patch.object(main.gh, "get_repo", return_value=private_repo), \
+             patch.object(main, "run_code") as sandbox, \
+             patch.object(main, "generate_patch") as model:
+            await main.fix_pipeline(ctx, "owner/private", "src/app.py", "fix it")
+        private_repo.get_contents.assert_not_called()
+        sandbox.assert_not_called()
+        model.assert_not_called()
+        self.assertIn("Private-repository", ctx.send.await_args.args[0])
 
     async def test_invalid_file_never_reaches_github(self):
         ctx = SimpleNamespace(send=AsyncMock())
