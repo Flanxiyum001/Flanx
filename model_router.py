@@ -20,15 +20,6 @@ TASK_ENV_VARS: Mapping[str, str] = {
 
 # These are configuration suggestions, not assumed FreeLLMAPI profile names.
 # Set a value only after confirming the profile/model exists in the gateway.
-TASK_DEFAULTS: Mapping[str, str] = {
-    "chat": "",
-    "general": "",
-    "research": "",
-    "coding": "",
-    "review": "",
-}
-
-
 def route_model(
     task: str,
     *,
@@ -60,13 +51,13 @@ def route_model(
     if legacy:
         return legacy
 
-    return TASK_DEFAULTS.get(task_key, "") or "gpt-4o-mini"
+    return ""
 
 
 def configured_routes(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return effective routes for diagnostics without exposing any secrets."""
     env = os.environ if environ is None else environ
-    fallback = env.get("AI_MODEL", "").strip() or "gpt-4o-mini"
+    fallback = env.get("AI_MODEL", "").strip() or "qwen-2.5-coder-32b"
     return {
         task: route_model(task, fallback=fallback, environ=env)
         for task in TASK_ENV_VARS
