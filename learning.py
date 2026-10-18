@@ -59,11 +59,15 @@ def _connect(*, create=True):
             os.makedirs(os.path.dirname(path), exist_ok=True)
         elif not os.path.isfile(path):
             raise LessonStorageError(f"Lesson database does not exist: {path!r}")
+        new_database = not os.path.exists(path)
         connection = sqlite3.connect(path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         if create:
-            connection.execute(_SCHEMA)
+            connection.execute("BEGIN IMMEDIATE")
+            if new_database:
+                connection.execute(_SCHEMA)
+            connection.execute("SELECT id FROM lessons LIMIT 1").fetchall()
             connection.commit()
         else:
             connection.execute("SELECT id FROM lessons LIMIT 1").fetchall()
