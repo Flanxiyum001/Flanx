@@ -213,7 +213,12 @@ values:
 
 ```sh
 python storage_admin.py --inventory
-python storage_admin.py --backup-dir /safe/new-backup-dir
+# Explicitly classify each missing store only after reviewing its inventory/history.
+python storage_admin.py --backup-dir /safe/new-backup-dir \
+  --allow-missing lessons_db \
+  --allow-missing legacy_lessons_json \
+  --allow-missing preferences \
+  --allow-missing usage
 python storage_admin.py --verify-backup /safe/new-backup-dir
 ```
 
@@ -221,10 +226,14 @@ Run these commands only in the environment that actually contains the real
 state files; a local repository checkout or new container is **not** a
 production backup. An inventory distinguishes missing paths (historical
 existence unknown), valid empty files, valid files with records, corrupt files,
-unreadable files, and inaccessible paths. If a store is known to have existed,
-supply `--expect-existing lessons_db` (or another store name, repeating the
-flag as necessary) when inventorying/backing up; missing expected stores block
-backup. A file not present at its current path does not prove it never existed.
+unreadable files, and inaccessible paths. A backup now refuses any missing
+store unless it is explicitly classified with repeated `--allow-missing STORE`
+flags. Use that only after reviewing whether the store was genuinely never
+initialized or is not required for this recovery point; the decision is recorded
+in the manifest and independently checked during verification. If a store is
+known to have existed, supply `--expect-existing STORE` when inventorying or
+backing up; missing expected stores block backup. A file not present at its
+current path does not prove it never existed.
 
 The SQLite snapshot uses the online backup API and includes committed WAL
 data. The manifest records source paths, backup checksums, counts, and
