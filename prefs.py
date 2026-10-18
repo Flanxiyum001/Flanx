@@ -41,7 +41,7 @@ def _load() -> dict:
             f"Could not read preference storage at {PREFS_FILE!r}; refusing to reset it."
         ) from exc
 
-    if not isinstance(data, dict) or not isinstance(data.get("users"), dict):
+    if not isinstance(data, dict) or set(data) != {"users"} or not isinstance(data.get("users"), dict):
         raise PreferenceStorageError(
             f"Preference storage at {PREFS_FILE!r} has an invalid structure; refusing to reset it."
         )
