@@ -43,6 +43,7 @@ AI_API_KEY = os.getenv("AI_API_KEY")
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://freellmapi.co/v1")
 AI_MODEL = os.getenv("AI_MODEL", "qwen-2.5-coder-32b")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+FLANX_DEFAULT_REPO = os.getenv("FLANX_DEFAULT_REPO")  # optional: default repo for chat mode
 
 WEB_RESULT_COUNT = 3
 CONTEXT_CHAR_BUDGET = 6_000  # cap each injected context block so prompts stay cheap
@@ -280,103 +281,266 @@ def github_file_url(repo_name: str, branch: str, path: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Chat mode: "@Flanx …" or "flanx …" with no prefix
+# --------------------------------------------------------------------------
+CHAT_HELP = (
+    "👋 **Flanx chat mode** — just talk to me, no prefix needed:\n"
+    "• `flanx help me with src/app.js in owner/repo — <what to change>`\n"
+    "• `@Flanx fix src/app.js in owner/repo: <what to change>`\n"
+    "• `flanx search <query> for me`\n"
+    "• `flanx what do you remember about owner/repo`\n"
+    "Prefix commands still work: `!flanx_fix`, `!update_repo`, `!flanx_brain`."
+)
+
+FILE_EXT_PATTERN = (
+    r"py|js|jsx|ts|tsx|java|go|rs|rb|php|css|html|scss|json|md|yml|yaml|"
+    r"sh|c|cpp|h|cs|swift|kt|txt|toml|ini|cfg"
+)
+FILE_PATH_RE = re.compile(rf"\b[\w][\w./-]*\.(?:{FILE_EXT_PATTERN})\b", re.IGNORECASE)
+REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
+CHAT_NAME_RE = re.compile(r"^\s*(?:hey\s+|yo\s+|oi\s+)?flanx\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
+MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
+HELP_RE = re.compile(r"^\s*(?:help|what\s+can\s+you\s+do|commands)\s*$", re.IGNORECASE)
+FIX_VERB_RE = re.compile(
+    r"^\s*(?:can\s+you\s+|pls\s+|please\s+)?"
+    r"(?:help\s+me\s+(?:with|to)\s+|fix|repair|patch|update|upgrade|improve|work\s+on)\b[:\s]*",
+    re.IGNORECASE,
+)
+
+
+def _strip_name_trigger(text: str) -> "str | None":
+    """'flanx help me with this' -> 'help me with this'; None when Flanx is not addressed."""
+    match = CHAT_NAME_RE.match((text or "").strip())
+    return match.group(1).strip() if match else None
+
+
+def _extract_repo(text: str) -> "str | None":
+    """First owner/repo token that is not a file path like src/app.py."""
+    for owner, name in REPO_RE.findall(text):
+        if re.fullmatch(FILE_EXT_PATTERN, name.rsplit(".", 1)[-1], re.IGNORECASE):
+            continue  # a file path, not a repository
+        return f"{owner}/{name}"
+    return None
+
+
+def _extract_file(text: str) -> "str | None":
+    match = FILE_PATH_RE.search(text or "")
+    return match.group(0) if match else None
+
+
+def _clean_search_query(text: str) -> str:
+    query = re.sub(
+        r"^\s*(?:can\s+you\s+|could\s+you\s+|pls\s+|please\s+)?", "", text, flags=re.IGNORECASE
+    )
+    query = SEARCH_VERB_RE.sub("", query, count=1)
+    query = re.sub(r"^\s*(?:the\s+)?(?:web|internet|online|google)?\s*(?:for\s+)?", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"\s*(?:for\s+me|please|pls)\s*$", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"\s+", " ", query).strip(" ?!.,")
+    return "" if query.lower() in {"me", "it", "for me", "please", "pls"} else query
+
+
+def _clean_goal(text: str, repo: "str | None", file_path: "str | None") -> str:
+    goal = text
+    if repo:
+        goal = goal.replace(repo, " ")
+    if file_path:
+        goal = goal.replace(file_path, " ")
+    goal = FIX_VERB_RE.sub("", goal, count=1)
+    goal = re.sub(r"\s+", " ", goal).strip(" ,:;|-—")
+    return re.sub(r"^(?:in|on|for)\s+(?=\S)", "", goal).strip(" ,:;|-—")
+
+
+def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dict]":
+    """Classify a chat request as ('search'|'brain'|'help'|'fix', payload)."""
+    stripped = (text or "").strip().strip("?.!")
+    if not stripped:
+        return "help", {}
+    if SEARCH_VERB_RE.search(stripped):
+        return "search", {"query": _clean_search_query(stripped)}
+    if MEMORY_RE.search(stripped):
+        return "brain", {"repo": _extract_repo(stripped) or default_repo}
+    if HELP_RE.match(stripped):
+        return "help", {}
+    repo = _extract_repo(stripped)
+    file_path = _extract_file(stripped)
+    return "fix", {
+        "repo": repo or default_repo,
+        "file": file_path,
+        "goal": _clean_goal(stripped, repo, file_path),
+    }
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    print(f"🤖 Flanx online as {bot.user} (free sandbox + cloud task staging)")
-    await bot.change_presence(activity=discord.Game(name="!update_repo · !flanx_fix · free sandbox"))
+    print(f"🤖 Flanx online as {bot.user} (chat mode + free sandbox + cloud task staging)")
+    await bot.change_presence(
+        activity=discord.Game(name="just say 'flanx …' · !flanx_fix · !update_repo")
+    )
+
+
+@bot.event
+async def on_message(message):
+    """Chat mode: '@Flanx …' or 'flanx …' with no prefix, alongside the !commands."""
+    if message.author.bot:
+        return
+
+    text = (message.content or "").strip()
+    if bot.user and any(user.id == bot.user.id for user in message.mentions):
+        remainder = re.sub(rf"<@!?{bot.user.id}>", "", text).strip()
+    else:
+        remainder = _strip_name_trigger(text)
+
+    if remainder is None:
+        await bot.process_commands(message)
+        return
+
+    intent, payload = chat_intent(remainder, FLANX_DEFAULT_REPO)
+    channel = message.channel
+    try:
+        if intent == "search":
+            query = payload["query"]
+            if not query:
+                await channel.send(
+                    "🔎 What should I look up? e.g. `flanx search python 3.14 changes for me`"
+                )
+            else:
+                async with channel.typing():
+                    results = await asyncio.to_thread(web_search, query)
+                await channel.send(
+                    f"🌐 **Search:** `{clip(query, 120)}`\n```\n{clip(results, 1800)}\n```"
+                )
+        elif intent == "brain":
+            repo = payload["repo"]
+            if not repo:
+                await channel.send(
+                    "🧠 Which repository? e.g. `flanx what do you remember about owner/repo`"
+                )
+            else:
+                memory = await asyncio.to_thread(read_flanx_brain, repo)
+                await channel.send(f"🧠 **Brain memory for `{repo}`**\n```\n{clip(memory, 1800)}\n```")
+        elif intent == "fix":
+            repo, file_path, goal = payload["repo"], payload["file"], payload["goal"]
+            missing = []
+            if not repo:
+                missing.append("the repository (`owner/repo`)")
+            if not file_path:
+                missing.append("the file path")
+            if not goal:
+                missing.append("what to change")
+            if missing:
+                await channel.send(
+                    "🛠️ I'm on it — I just need " + ", ".join(missing) + ".\n" + CHAT_HELP
+                )
+            else:
+                async with channel.typing():
+                    await fix_pipeline(channel, repo, file_path, goal)
+        else:
+            await channel.send(CHAT_HELP)
+    except Exception as exc:
+        await channel.send(f"⚠️ **Matrix exception:** {clip(str(exc), 300)}")
+
+    await bot.process_commands(message)
+
+
+async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str) -> None:
+    """Full repair cycle. `ctx` is a command ctx or any Discord messageable with .send()."""
+    try:
+        await ctx.send(f"📡 *Jarvis sequence initiated.* Pulling `{file_path}` from `{repo_name}`...")
+        repo = await asyncio.to_thread(gh.get_repo, repo_name)
+        default_branch = repo.default_branch
+
+        def fetch_file():
+            return repo.get_contents(file_path, ref=default_branch)
+
+        file_obj = await asyncio.to_thread(fetch_file)
+        if isinstance(file_obj, list):
+            await ctx.send(f"⚠️ `{file_path}` is a directory — point Flanx at a single file.")
+            return
+        original_code = file_obj.decoded_content.decode("utf-8", errors="replace")
+
+        # 1-3. Memory recall, web research and the sandbox baseline are independent
+        # network calls — run them concurrently so the slowest one sets the pace
+        # instead of the sum of all three.
+        await ctx.send(
+            "🌐 Pulling memory + live web docs + free cloud sandbox baseline in parallel..."
+        )
+        past_memories, live_web_intel, baseline = await asyncio.gather(
+            asyncio.to_thread(read_flanx_brain, repo_name),
+            asyncio.to_thread(web_search, diagnostic_goal),
+            asyncio.to_thread(run_code, original_code),
+        )
+        baseline_report = baseline.for_prompt("baseline run")
+        if not baseline.ok:
+            await ctx.send(f"⚠️ **Sandbox unreachable — aborting.** {baseline.error}")
+            return
+
+        # 4. Compose the patch from memory + web intel + sandbox trace
+        await ctx.send("🧠 Composing the patch from memory + web intel + sandbox trace...")
+        try:
+            raw_patch = await generate_patch(
+                original_code, file_path, default_branch,
+                past_memories, live_web_intel, baseline_report, diagnostic_goal,
+            )
+        except Exception as exc:
+            await ctx.send(
+                f"⚠️ **LLM layer error** (`{AI_MODEL}` @ `{AI_BASE_URL}`): "
+                f"`{clip(str(exc), 300)}`"
+            )
+            return
+        if not raw_patch.strip():
+            await ctx.send("⚠️ The model returned an empty patch — aborting before any push.")
+            return
+
+        # 5. Prove the patch in the sandbox before touching GitHub
+        await ctx.send("🔄 Validating the patch inside the sandbox...")
+        validation = await asyncio.to_thread(run_code, raw_patch)
+
+        if not validation.passed:
+            insight = (
+                f"FAILED patch for `{file_path}` (goal: {diagnostic_goal[:60]}) — "
+                f"sandbox exit {validation.exit_code if validation.exit_code is not None else 'n/a'}: "
+                f"{clip(validation.stderr or validation.error, 140)}"
+            )
+            await asyncio.to_thread(update_flanx_brain, repo_name, insight)
+            await ctx.send(
+                "⚠️ **Patch failed sandbox validation — lesson logged to the brain so it "
+                f"is not repeated.**\n{validation.for_discord()}"
+            )
+            return
+
+        # 6. Success: record the lesson, then branch + PR
+        insight = (
+            f"Fixed `{file_path}` (goal: {diagnostic_goal[:70]}) — "
+            "passed sandbox validation with exit code 0."
+        )
+        await asyncio.to_thread(update_flanx_brain, repo_name, insight)
+
+        await ctx.send("🚀 Validation clean! Creating the branch and opening the pull request...")
+        pr_url = await asyncio.to_thread(
+            open_pull_request, repo, file_path, raw_patch, diagnostic_goal,
+            validation.for_prompt("validation run"),
+        )
+
+        await ctx.send(
+            "✅ **Mission complete.** The patch ran cleanly in the sandbox and the brain has "
+            f"been updated.\nReview the PR: {pr_url}"
+        )
+
+    except GithubException as exc:
+        await ctx.send(f"⚠️ **GitHub error** `{exc.status}`: {clip(str(exc.data), 300)}")
+    except Exception as exc:
+        await ctx.send(f"⚠️ **Matrix exception:** {clip(str(exc), 300)}")
 
 
 @bot.command(name="flanx_fix")
 async def flanx_fix(ctx, repo_name: str, file_path: str, *, diagnostic_goal: str):
     """Pull a file from GitHub, patch it with AI, prove it in the free sandbox, open a PR."""
     async with ctx.typing():
-        try:
-            await ctx.send(f"📡 *Jarvis sequence initiated.* Pulling `{file_path}` from `{repo_name}`...")
-            repo = await asyncio.to_thread(gh.get_repo, repo_name)
-            default_branch = repo.default_branch
-
-            def fetch_file():
-                return repo.get_contents(file_path, ref=default_branch)
-
-            file_obj = await asyncio.to_thread(fetch_file)
-            if isinstance(file_obj, list):
-                await ctx.send(f"⚠️ `{file_path}` is a directory — point Flanx at a single file.")
-                return
-            original_code = file_obj.decoded_content.decode("utf-8", errors="replace")
-
-            # 1. Recall what Flanx has learned before
-            past_memories = await asyncio.to_thread(read_flanx_brain, repo_name)
-
-            # 2. Live web research for current docs and known fixes
-            await ctx.send("🌐 Scanning the live web for current docs and known fixes...")
-            live_web_intel = await asyncio.to_thread(web_search, diagnostic_goal)
-
-            # 3. Baseline run of the current file in the free sandbox
-            await ctx.send("🧱 Running the original file in the free cloud sandbox...")
-            baseline = await asyncio.to_thread(run_code, original_code)
-            baseline_report = baseline.for_prompt("baseline run")
-            if not baseline.ok:
-                await ctx.send(f"⚠️ **Sandbox unreachable — aborting.** {baseline.error}")
-                return
-
-            # 4. Compose the patch from memory + web intel + sandbox trace
-            await ctx.send("🧠 Composing the patch from memory + web intel + sandbox trace...")
-            try:
-                raw_patch = await generate_patch(
-                    original_code, file_path, default_branch,
-                    past_memories, live_web_intel, baseline_report, diagnostic_goal,
-                )
-            except Exception as exc:
-                await ctx.send(
-                    f"⚠️ **LLM layer error** (`{AI_MODEL}` @ `{AI_BASE_URL}`): "
-                    f"`{clip(str(exc), 300)}`"
-                )
-                return
-            if not raw_patch.strip():
-                await ctx.send("⚠️ The model returned an empty patch — aborting before any push.")
-                return
-
-            # 5. Prove the patch in the sandbox before touching GitHub
-            await ctx.send("🔄 Validating the patch inside the sandbox...")
-            validation = await asyncio.to_thread(run_code, raw_patch)
-
-            if not validation.passed:
-                insight = (
-                    f"FAILED patch for `{file_path}` (goal: {diagnostic_goal[:60]}) — "
-                    f"sandbox exit {validation.exit_code if validation.exit_code is not None else 'n/a'}: "
-                    f"{clip(validation.stderr or validation.error, 140)}"
-                )
-                await asyncio.to_thread(update_flanx_brain, repo_name, insight)
-                await ctx.send(
-                    "⚠️ **Patch failed sandbox validation — lesson logged to the brain so it "
-                    f"is not repeated.**\n{validation.for_discord()}"
-                )
-                return
-
-            # 6. Success: record the lesson, then branch + PR
-            insight = (
-                f"Fixed `{file_path}` (goal: {diagnostic_goal[:70]}) — "
-                "passed sandbox validation with exit code 0."
-            )
-            await asyncio.to_thread(update_flanx_brain, repo_name, insight)
-
-            await ctx.send("🚀 Validation clean! Creating the branch and opening the pull request...")
-            pr_url = await asyncio.to_thread(
-                open_pull_request, repo, file_path, raw_patch, diagnostic_goal,
-                validation.for_prompt("validation run"),
-            )
-
-            await ctx.send(
-                "✅ **Mission complete.** The patch ran cleanly in the sandbox and the brain has "
-                f"been updated.\nReview the PR: {pr_url}"
-            )
-
-        except GithubException as exc:
-            await ctx.send(f"⚠️ **GitHub error** `{exc.status}`: {clip(str(exc.data), 300)}")
-        except Exception as exc:
-            await ctx.send(f"⚠️ **Matrix exception:** {clip(str(exc), 300)}")
+        await fix_pipeline(ctx, repo_name, file_path, diagnostic_goal)
 
 
 @bot.command(name="update_repo")

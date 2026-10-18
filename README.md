@@ -14,6 +14,8 @@ sandbox, learns from the result, and opens a pull request — all from a Discord
 2. Read `brain_memory.txt` from that repo — Flanx's diary of past successes and failures.
 3. Search the live web for current docs / known fixes (`ddgs`).
 4. Baseline-run the current file in the free sandbox to capture a real error trace.
+   (Steps 2–4 are independent, so Flanx runs them **concurrently** — the slowest one
+   sets the pace instead of the sum of all three.)
 5. Ask the LLM for a complete replacement file (raw code, no markdown fences).
 6. Re-run the patched file in the sandbox — **if it fails, the failure is written to
    the brain and no branch is pushed.**
@@ -37,6 +39,26 @@ gateway never stalls.
 - `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
   fresh branch for an external agent session to execute
 - `!flanx_brain <owner/repo>` — print what Flanx remembers for that repository
+
+All of these also work as plain chat (`flanx …` / `@Flanx …`) — see **Chat mode** below.
+
+## Chat mode (no prefix needed)
+
+Talk to Flanx in plain chat — it answers when you **mention it** (`@Flanx …`) or start a
+message with the word `flanx` (case-insensitive, `hey flanx`/`flanx,` also work):
+
+| You type | Flanx does |
+| --- | --- |
+| `flanx help me with src/app.js in owner/repo — add retry logic` | runs the full `!flanx_fix` repair pipeline |
+| `@Flanx fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
+| `flanx search python 3.14 changes for me` | live web search, results posted back |
+| `flanx what do you remember about owner/repo` | prints that repo's brain memory |
+| `flanx help` | usage card |
+
+Parsing pulls out the `owner/repo` and the file path automatically; set
+`FLANX_DEFAULT_REPO=owner/repo` and you can omit the repo. If something is missing,
+Flanx asks for exactly that piece instead of guessing. `!`-prefix commands keep working,
+and plain messages that don't address Flanx are ignored.
 
 ## Cloud staging with `!update_repo`
 
@@ -74,6 +96,7 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `AI_MODEL` | no | default `qwen-2.5-coder-32b` |
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
+| `FLANX_DEFAULT_REPO` | no | default `owner/repo` used by chat mode when a message omits it |
 
 ## Setup
 
