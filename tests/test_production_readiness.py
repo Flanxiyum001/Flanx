@@ -233,6 +233,18 @@ class GitHubAccessControlTests(unittest.TestCase):
         read.assert_not_called()
         write.assert_not_called()
 
+    def test_memory_helper_never_writes_custom_default_branch(self):
+        client = MagicMock()
+        remote = client.get_repo.return_value
+        remote.default_branch = "production"
+        with patch.object(free_sandbox, "_client", return_value=client):
+            result = free_sandbox.update_flanx_brain(
+                "owner/repo", "never commit without approval", ref="production"
+            )
+        self.assertFalse(result)
+        remote.update_file.assert_not_called()
+        remote.create_file.assert_not_called()
+
     def test_private_github_brain_does_not_read_source(self):
         client = MagicMock()
         repository = client.get_repo.return_value
