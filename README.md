@@ -17,8 +17,10 @@ sandbox, learns from the result, and opens a pull request — all from a Discord
    (Steps 2–4 are independent, so Flanx runs them **concurrently** — the slowest one
    sets the pace instead of the sum of all three.)
 5. Ask the LLM for a complete replacement file (raw code, no markdown fences).
-6. Re-run the patched file in the sandbox — **if it fails, the failure is written to
-   the brain and no branch is pushed.**
+6. Re-run the patched file in the sandbox. On a failure the **retry ladder** kicks in:
+   one more attempt at temperature 0 (on `AI_RETRY_MODEL` if set) with the failure log
+   attached. Only after all attempts fail is the lesson written to the brain and no
+   branch pushed.
 7. On success, write the lesson to the brain, push a branch and open a PR.
 
 All blocking work (PyGithub, sandbox HTTP, web search) runs in threads so the Discord
@@ -32,6 +34,9 @@ gateway never stalls.
 | `free_sandbox.py` | OnlineCompiler.io execution + `brain_memory.txt` read/write |
 | `requirements.txt` | `discord.py`, `openai`, `PyGithub`, `requests`, `ddgs` |
 | `knowledge.md` | Repo-level directive that steers Freebuff/Codebuff agents handling `tasks/*.md` |
+| `usage.py` | Persistent LLM token/cost counters and monthly sandbox-quota tracking |
+| `prefs.py` | Per-user companion preferences: timezone + personal notes (JSON) |
+| `integrations/` | Pluggable integration modules (`clock`, `notes`, `_template`) with auto-discovery |
 
 ## Commands
 
@@ -39,6 +44,7 @@ gateway never stalls.
 - `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
   fresh branch for an external agent session to execute
 - `!flanx_brain <owner/repo>` — print what Flanx remembers for that repository
+- `!flanx_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
 All of these also work as plain chat (`flanx …` / `@Flanx …`) — see **Chat mode** below.
 
@@ -53,12 +59,54 @@ message with the word `flanx` (case-insensitive, `hey flanx`/`flanx,` also work)
 | `@Flanx fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
 | `flanx search python 3.14 changes for me` | live web search, results posted back |
 | `flanx what do you remember about owner/repo` | prints that repo's brain memory |
+| `flanx stats` / `flanx how many tokens have you used` | usage: tokens, cost, sandbox quota |
+| `flanx yo sup` / `flanx how are you` / `flanx who are you` | friendly companion replies (no fix-request nagging) |
+| `flanx set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
+| `flanx what time is it` | current time in your saved timezone (or `flanx time in America/New_York`) |
+| `flanx remember <anything>` / `flanx show notes` | personal notes, stored per user |
 | `flanx help` | usage card |
 
 Parsing pulls out the `owner/repo` and the file path automatically; set
-`FLANX_DEFAULT_REPO=owner/repo` and you can omit the repo. If something is missing,
-Flanx asks for exactly that piece instead of guessing. `!`-prefix commands keep working,
-and plain messages that don't address Flanx are ignored.
+`FLANX_DEFAULT_REPO=owner/repo` and you can omit the repo. **Casual chat never gets the
+help card** — if a request is a fix but lacks details, Flanx asks for just that one
+thing, in one friendly line. `!`-prefix commands keep working, and plain messages that
+don't address Flanx are ignored.
+
+### Companion behaviour
+
+Flanx recognises greetings (`yo sup`, `good morning`), `how are you`, `who are you`,
+`thanks`, time/timezone requests and personal notes — all answered conversationally
+instead of being treated as broken GitHub commands. Timezones and notes are stored per
+Discord user in `flanx_prefs.json` (git-ignored; point `FLANX_PREFS_FILE` at a
+persistent path to keep them across Railway redeploys). Notes are capped at 50 per
+user so the file stays small.
+
+## Adding your own integrations
+
+Flanx has a **drop-in plugin system** — new capabilities need no changes to `main.py`:
+
+1. Copy `integrations/_template.py` to `integrations/<name>.py` (any name **without** a
+   leading underscore; underscore-prefixed files are ignored so the template stays
+dormant).
+2. Fill in the contract:
+   ```python
+   NAME = "weather"                    # slug used by the router
+   DESCRIPTION = "current weather"     # shown by `flanx integrations`
+   USAGE = ["flanx weather in Pune"]   # example phrase
+   def match(text: str) -> dict | None  # claim a message -> payload, else None
+   async def handle(event, payload) -> str  # do the work, return the reply
+   ```
+3. Restart the bot. `flanx integrations` now lists it, and any chat message its
+   `match()` claims is routed to `handle()` — search/stats/fix intents keep priority
+   over your claims only where they are checked first, so keep `match()` anchored and
+   specific.
+
+Rules the registry enforces: modules missing `NAME`/`match`/`handle` are skipped with a
+console warning instead of crashing the bot, blocking I/O inside `handle()` belongs in
+`asyncio.to_thread(...)`, and the returned string is posted verbatim (keep it English,
+under 2000 chars). Shipped examples: **`clock`** (timezone + time) and **`notes`**
+(personal notes) — both were originally hard-wired in `main.py` and now live as
+modules, proving the contract.
 
 ## Cloud staging with `!update_repo`
 
@@ -97,6 +145,12 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
 | `FLANX_DEFAULT_REPO` | no | default `owner/repo` used by chat mode when a message omits it |
+| `FLANX_FIX_ATTEMPTS` | no | retry-ladder depth, `1`–`3` (default `2` = first try + one retry) |
+| `AI_RETRY_MODEL` | no | second model used for retries; unset = same model at temperature 0 |
+| `AI_INPUT_PRICE_PER_M` | no | USD per 1M prompt tokens for the cost counter (default `0` = free pool) |
+| `AI_OUTPUT_PRICE_PER_M` | no | USD per 1M completion tokens (default `0` = free pool) |
+| `FLANX_USAGE_FILE` | no | counter file path (default `flanx_usage.json`) |
+| `FLANX_PREFS_FILE` | no | companion preferences path (default `flanx_prefs.json`) |
 
 ## Setup
 
@@ -152,6 +206,25 @@ Flanx is English 24/7 through two layers:
 
 Discord messages, PR titles/bodies and `brain_memory.txt` entries are written by the bot
 itself and are always English.
+
+## Usage counters, cost and the retry ladder
+
+**Counters** (`!flanx_stats` or `flanx stats`) are maintained in `flanx_usage.json`
+(git-ignored, written atomically, thread-safe):
+
+- **LLM:** call count, prompt/completion/total tokens, per-model breakdown, and
+  estimated USD cost. Cost is `$0` by design while you run on the free token pool —
+  set `AI_INPUT_PRICE_PER_M` / `AI_OUTPUT_PRICE_PER_M` if you move to a paid endpoint
+  (OpenRouter lists `qwen-2.5-coder-32b` at $0.66 / $1.00 per 1M tokens).
+- **Sandbox:** runs used this calendar month against the free plan's 100,000 quota,
+  with pass rate and remaining balance; counters reset on month rollover.
+- The file lives on the host, so on Railway a redeploy resets it unless you point
+  `FLANX_USAGE_FILE` at a persistent volume.
+
+**Retry ladder:** when a generated patch fails sandbox validation, Flanx regenerates
+at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the exact failure log
+injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts. Only the final
+failure is written to the brain, so the memory log stays signal, not noise.
 
 ## The brain
 

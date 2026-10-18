@@ -29,6 +29,9 @@ from github import Github, GithubException, UnknownObjectException
 from openai import AsyncOpenAI
 
 from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
+from usage import format_usage, record_llm_usage, record_sandbox_run
+
+import integrations  # pluggable modules: drop a file into integrations/ to add one
 
 try:
     from ddgs import DDGS
@@ -44,6 +47,12 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://freellmapi.co/v1")
 AI_MODEL = os.getenv("AI_MODEL", "qwen-2.5-coder-32b")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 FLANX_DEFAULT_REPO = os.getenv("FLANX_DEFAULT_REPO")  # optional: default repo for chat mode
+AI_RETRY_MODEL = os.getenv("AI_RETRY_MODEL")  # optional second model for the retry ladder
+
+try:
+    FIX_ATTEMPTS = max(1, min(3, int(os.getenv("FLANX_FIX_ATTEMPTS", "2"))))
+except ValueError:
+    FIX_ATTEMPTS = 2  # initial attempt + one retry by default (clamped 1..3)
 
 WEB_RESULT_COUNT = 3
 CONTEXT_CHAR_BUDGET = 6_000  # cap each injected context block so prompts stay cheap
@@ -146,7 +155,12 @@ async def generate_patch(
     web_intel: str,
     baseline: str,
     goal: str,
+    *,
+    model: "str | None" = None,
+    temperature: float = 0.1,
+    retry_feedback: str = "",
 ) -> str:
+    model = model or AI_MODEL
     system_prompt = SYSTEM_PROMPT.format(
         memory=clip(memory, CONTEXT_CHAR_BUDGET),
         web_intel=web_intel,
@@ -155,6 +169,12 @@ async def generate_patch(
         branch_default=branch_default,
         original_code=clip(original_code, 24_000),
     )
+    if retry_feedback:
+        system_prompt += (
+            "\n--- WHY THE PREVIOUS ATTEMPT WAS REJECTED BY THE SANDBOX ---\n"
+            f"{retry_feedback}\n"
+            "Fix that specific failure this time.\n"
+        )
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": goal},
@@ -162,10 +182,13 @@ async def generate_patch(
     patch = ""
     for attempt in range(LLM_MAX_ATTEMPTS):
         completion = await ai_client.chat.completions.create(
-            model=AI_MODEL,
-            temperature=0.1,
+            model=model,
+            temperature=temperature,
             messages=messages,
         )
+        served_model = getattr(completion, "model", None) or model
+        if getattr(completion, "usage", None) is not None:
+            record_llm_usage(served_model, completion.usage)
         content = completion.choices[0].message.content or ""
         patch = strip_code_fences(content)
         if not is_non_english(patch, original_code):
@@ -289,7 +312,24 @@ CHAT_HELP = (
     "• `@Flanx fix src/app.js in owner/repo: <what to change>`\n"
     "• `flanx search <query> for me`\n"
     "• `flanx what do you remember about owner/repo`\n"
-    "Prefix commands still work: `!flanx_fix`, `!update_repo`, `!flanx_brain`."
+    "• `flanx stats` — token usage, estimated cost and sandbox quota\n"
+    "• `flanx set timezone Asia/Kolkata` · `flanx what time is it`\n"
+    "• `flanx remember <anything>` · `flanx show notes`\n"
+    "• `flanx integrations` — list the pluggable modules\n"
+    "Prefix commands still work: `!flanx_fix`, `!update_repo`, `!flanx_brain`, `!flanx_stats`."
+)
+
+PERSONA_CARD = (
+    "🤖 **I'm Flanx** — your coding companion and personal assistant.\n"
+    "**Coding:** pull a file, patch it with AI, prove it in a free cloud sandbox, open a PR.\n"
+    "**Web:** `flanx search <query> for me`.\n"
+    "**Memory:** a repo brain (`flanx what do you remember about owner/repo`) "
+    "and your private notes (`flanx remember …`).\n"
+    "**Daily stuff:** time in your timezone (`flanx set timezone Asia/Kolkata`), "
+    "usage stats (`flanx stats`).\n"
+    "**Extensions:** `flanx integrations` lists the pluggable modules — drop a new file "
+    "into `integrations/` to add one.\n"
+    "No prefix needed — just start with `flanx` or tag me."
 )
 
 FILE_EXT_PATTERN = (
@@ -301,10 +341,32 @@ REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
 CHAT_NAME_RE = re.compile(r"^\s*(?:hey\s+|yo\s+|oi\s+)?flanx\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
 MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
+STATS_RE = re.compile(
+    r"^\s*(?:stats|usage|cost|quota|tokens?)\b"
+    r"|(?:how\s+many\s+tokens|token\s+count|what(?:'s|\s+is)\s+my\s+(?:usage|cost))",
+    re.IGNORECASE,
+)
+EXTENSIONS_RE = re.compile(
+    r"^\s*(?:what\s+)?(?:integrations?|plugins?|extensions?|modules?)"
+    r"(?:\s+(?:do\s+you\s+have|are\s+installed|list))?\s*$",
+    re.IGNORECASE,
+)
+WHO_RE = re.compile(r"^\s*(?:who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|your\s+name)\b", re.IGNORECASE)
+HOWAREYOU_RE = re.compile(
+    r"^\s*(?:how(?:'s|\s+is)?\s+(?:it\s+going|are\s+you|you(?:'re|\s+are)?\s+doing)|you\s+(?:ok|there|good))\b.*$",
+    re.IGNORECASE,
+)
+THANKS_RE = re.compile(r"^\s*(?:thanks|thank\s+you|thx|ty|cheers)\b.*$", re.IGNORECASE)
+GREETING_RE = re.compile(
+    r"^\s*(?:yo|hi|hey|hello|sup|howdy|hii+)\b"
+    r"(?:\s+(?:yo|hi|hey|there|sup|bro|man|dude|flanx|guys))?\s*$"
+    r"|^good\s+(?:morning|afternoon|evening)\b.*$",
+    re.IGNORECASE,
+)
 HELP_RE = re.compile(r"^\s*(?:help|what\s+can\s+you\s+do|commands)\s*$", re.IGNORECASE)
 FIX_VERB_RE = re.compile(
     r"^\s*(?:can\s+you\s+|pls\s+|please\s+)?"
-    r"(?:help\s+me\s+(?:with|to)\s+|fix|repair|patch|update|upgrade|improve|work\s+on)\b[:\s]*",
+    r"(?:help\s+me(?:\s+(?:with|to))?\s+|fix|repair|patch|update|upgrade|improve|work\s+on)\b[:\s]*",
     re.IGNORECASE,
 )
 
@@ -348,16 +410,35 @@ def _clean_goal(text: str, repo: "str | None", file_path: "str | None") -> str:
         goal = goal.replace(file_path, " ")
     goal = FIX_VERB_RE.sub("", goal, count=1)
     goal = re.sub(r"\s+", " ", goal).strip(" ,:;|-—")
+    # remove filler left behind when the file/repo tokens were stripped:
+    # doubled prepositions ("in in") from two removals, then one leading one
+    goal = re.sub(r"\b(in|on|for|at|to|from|of)\s+\1\b", "", goal, flags=re.IGNORECASE)
+    goal = re.sub(r"\s+", " ", goal)
     return re.sub(r"^(?:in|on|for)\s+(?=\S)", "", goal).strip(" ,:;|-—")
 
 
 def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dict]":
-    """Classify a chat request as ('search'|'brain'|'help'|'fix', payload)."""
+    """Classify a chat request: greeting/time/notes/who … or search/brain/help/fix."""
     stripped = (text or "").strip().strip("?.!")
     if not stripped:
         return "help", {}
+    extension = integrations.match(stripped)
+    if extension:
+        return "integration", {"name": extension[0], "payload": extension[1]}
     if SEARCH_VERB_RE.search(stripped):
         return "search", {"query": _clean_search_query(stripped)}
+    if STATS_RE.search(stripped):
+        return "stats", {}
+    if EXTENSIONS_RE.match(stripped):
+        return "integrations", {}
+    if WHO_RE.match(stripped):
+        return "who", {}
+    if HOWAREYOU_RE.match(stripped):
+        return "howareyou", {}
+    if THANKS_RE.match(stripped):
+        return "thanks", {}
+    if GREETING_RE.match(stripped):
+        return "greeting", {"text": stripped}
     if MEMORY_RE.search(stripped):
         return "brain", {"repo": _extract_repo(stripped) or default_repo}
     if HELP_RE.match(stripped):
@@ -413,6 +494,50 @@ async def on_message(message):
                 await channel.send(
                     f"🌐 **Search:** `{clip(query, 120)}`\n```\n{clip(results, 1800)}\n```"
                 )
+        elif intent == "stats":
+            await channel.send(await asyncio.to_thread(format_usage))
+        elif intent == "integration":
+            reply = await integrations.dispatch(
+                payload["name"],
+                payload["payload"],
+                integrations.ChatEvent(
+                    channel=channel, author_id=message.author.id, raw_text=remainder
+                ),
+            )
+            if reply:
+                await channel.send(reply)
+        elif intent == "integrations":
+            lines = [
+                "🧩 **Installed integrations** — drop a new module into `integrations/` "
+                "to add another (no core changes needed):"
+            ]
+            for name, description, usages in integrations.catalog():
+                example = f" — e.g. `{usages[0]}`" if usages else ""
+                lines.append(f"• **{name}**: {description}{example}")
+            await channel.send("\n".join(lines))
+        elif intent == "who":
+            await channel.send(PERSONA_CARD)
+        elif intent == "howareyou":
+            await channel.send(
+                "Running smooth ✅ — sandbox green, counters ticking, brain intact. "
+                "What are we building today?"
+            )
+        elif intent == "thanks":
+            await channel.send("Anytime 🙌 Just say the word.")
+        elif intent == "greeting":
+            text = payload.get("text", "").lower()
+            if "morning" in text:
+                opener = "Good morning ☀️"
+            elif "afternoon" in text:
+                opener = "Good afternoon 🌤️"
+            elif "evening" in text:
+                opener = "Good evening 🌙"
+            else:
+                opener = "Yo! 👋"
+            await channel.send(
+                f"{opener} I'm Flanx — I patch code on GitHub, search the web, keep time "
+                "and take notes for you. Try `flanx help` for the full menu."
+            )
         elif intent == "brain":
             repo = payload["repo"]
             if not repo:
@@ -426,14 +551,15 @@ async def on_message(message):
             repo, file_path, goal = payload["repo"], payload["file"], payload["goal"]
             missing = []
             if not repo:
-                missing.append("the repository (`owner/repo`)")
+                missing.append("the repo (`owner/repo`)")
             if not file_path:
                 missing.append("the file path")
             if not goal:
-                missing.append("what to change")
+                missing.append("what you'd like changed")
             if missing:
                 await channel.send(
-                    "🛠️ I'm on it — I just need " + ", ".join(missing) + ".\n" + CHAT_HELP
+                    "🙂 Happy to help with that — I just need " + " and ".join(missing) + ".\n"
+                    "e.g. `flanx help me with src/app.js in owner/repo — <what to change>`"
                 )
             else:
                 async with channel.typing():
@@ -474,41 +600,68 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             asyncio.to_thread(run_code, original_code),
         )
         baseline_report = baseline.for_prompt("baseline run")
+        record_sandbox_run(baseline)
         if not baseline.ok:
             await ctx.send(f"⚠️ **Sandbox unreachable — aborting.** {baseline.error}")
             return
 
-        # 4. Compose the patch from memory + web intel + sandbox trace
-        await ctx.send("🧠 Composing the patch from memory + web intel + sandbox trace...")
-        try:
-            raw_patch = await generate_patch(
-                original_code, file_path, default_branch,
-                past_memories, live_web_intel, baseline_report, diagnostic_goal,
-            )
-        except Exception as exc:
+        # 4-5. Generate -> validate, with a retry ladder: a failed sandbox check
+        # triggers another attempt at temperature 0 (on AI_RETRY_MODEL if set),
+        # carrying the failure log forward so the model can fix the actual problem.
+        validation = None
+        raw_patch = ""
+        retry_feedback = ""
+        model, temperature = AI_MODEL, 0.1
+        for attempt in range(1, FIX_ATTEMPTS + 1):
+            if attempt == 1:
+                await ctx.send("🧠 Composing the patch from memory + web intel + sandbox trace...")
+            else:
+                model = AI_RETRY_MODEL or model
+                temperature = 0.0
+                await ctx.send(
+                    f"🔁 Retry {attempt}/{FIX_ATTEMPTS}: regenerating at temperature 0"
+                    + (f" on `{model}`" if AI_RETRY_MODEL else "")
+                    + " with the failure log attached..."
+                )
+            try:
+                raw_patch = await generate_patch(
+                    original_code, file_path, default_branch,
+                    past_memories, live_web_intel, baseline_report, diagnostic_goal,
+                    model=model, temperature=temperature, retry_feedback=retry_feedback,
+                )
+            except Exception as exc:
+                await ctx.send(
+                    f"⚠️ **LLM layer error** (`{model}` @ `{AI_BASE_URL}`): "
+                    f"`{clip(str(exc), 300)}`"
+                )
+                return
+            if not raw_patch.strip():
+                await ctx.send("⚠️ The model returned an empty patch — aborting before any push.")
+                return
+
             await ctx.send(
-                f"⚠️ **LLM layer error** (`{AI_MODEL}` @ `{AI_BASE_URL}`): "
-                f"`{clip(str(exc), 300)}`"
+                f"🔄 Validating the patch in the free sandbox (attempt {attempt}/{FIX_ATTEMPTS})..."
             )
-            return
-        if not raw_patch.strip():
-            await ctx.send("⚠️ The model returned an empty patch — aborting before any push.")
-            return
-
-        # 5. Prove the patch in the sandbox before touching GitHub
-        await ctx.send("🔄 Validating the patch inside the sandbox...")
-        validation = await asyncio.to_thread(run_code, raw_patch)
-
-        if not validation.passed:
+            validation = await asyncio.to_thread(run_code, raw_patch)
+            record_sandbox_run(validation)
+            if validation.passed:
+                break
+            retry_feedback = (
+                f"Your previous patch for `{file_path}` failed sandbox validation:\n"
+                f"{validation.for_prompt('failed attempt')}"
+            )
+        else:
+            exit_code = validation.exit_code if validation and validation.exit_code is not None else "n/a"
+            detail = (validation.stderr or validation.error) if validation else "no run result"
             insight = (
-                f"FAILED patch for `{file_path}` (goal: {diagnostic_goal[:60]}) — "
-                f"sandbox exit {validation.exit_code if validation.exit_code is not None else 'n/a'}: "
-                f"{clip(validation.stderr or validation.error, 140)}"
+                f"FAILED patch for `{file_path}` after {FIX_ATTEMPTS} attempt(s) "
+                f"(goal: {diagnostic_goal[:60]}) — sandbox exit {exit_code}: {clip(detail, 140)}"
             )
             await asyncio.to_thread(update_flanx_brain, repo_name, insight)
             await ctx.send(
-                "⚠️ **Patch failed sandbox validation — lesson logged to the brain so it "
-                f"is not repeated.**\n{validation.for_discord()}"
+                f"⚠️ **Patch failed sandbox validation after {FIX_ATTEMPTS} attempt(s) — lesson "
+                f"logged to the brain so it is not repeated.**\n"
+                f"{validation.for_discord() if validation else 'no run result'}"
             )
             return
 
@@ -621,6 +774,12 @@ async def flanx_brain(ctx, repo_name: str):
     """Show what Flanx remembers from past runs in a repository."""
     memory = await asyncio.to_thread(read_flanx_brain, repo_name)
     await ctx.send(f"🧠 **Brain memory for `{repo_name}`**\n```\n{clip(memory, 1800)}\n```")
+
+
+@bot.command(name="flanx_stats")
+async def flanx_stats(ctx):
+    """Show LLM token usage, estimated cost and sandbox quota consumption."""
+    await ctx.send(await asyncio.to_thread(format_usage))
 
 
 if __name__ == "__main__":

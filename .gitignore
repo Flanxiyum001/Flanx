@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+flanx_usage.json
+flanx_usage.json.tmp
+flanx_prefs.json
+flanx_prefs.json.tmp
