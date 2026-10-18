@@ -563,7 +563,7 @@ async def on_message(message):
         selected_repo = get_pref(message.author.id, "repo", FLANX_DEFAULT_REPO)
         intent, payload = chat_intent(remainder, selected_repo)
         uses_github = intent in {"fix", "review", "brain"} or (
-            intent == "integration" and payload["name"] == "repos"
+            intent == "integration" and payload["name"] in {"repos", "lessons"}
         )
         if uses_github and not github_user_allowed(message.author.id):
             await channel.send(GITHUB_ACCESS_DENIED)
