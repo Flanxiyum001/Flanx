@@ -21,6 +21,9 @@ class LearningTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.add(evidence="")
     def test_owner_repo_format_required(self):
         with self.assertRaises(ValueError): self.add(repo="repo")
+    def test_repository_must_have_exactly_two_components(self):
+        for repo in ("owner/", "/repo", "owner/repo/extra"):
+            with self.subTest(repo=repo), self.assertRaises(ValueError): self.add(repo=repo)
     def test_duplicate_updates_existing_lesson(self):
         first = self.add()
         second = self.add(repo="OWNER/REPO", failure="CI IMPORT ERROR", cause="MISSING MODULE", prevention="better fix", evidence="second test passed")
