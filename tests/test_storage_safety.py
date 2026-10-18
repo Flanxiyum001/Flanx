@@ -68,7 +68,10 @@ class UsageStorageTests(unittest.TestCase):
                 "lessons_db": db, "legacy_lessons_json": legacy,
                 "preferences": prefs, "usage": usage_file,
             }):
-                before = {path: open(path, "rb").read() for path in (db, prefs, legacy, usage_file)}
+                before = {}
+                for path in (db, prefs, legacy, usage_file):
+                    with open(path, "rb") as handle:
+                        before[path] = handle.read()
                 destination = os.path.join(self.temp.name, "backup")
                 manifest = storage_admin.backup(destination)
                 self.assertEqual(len([f for f in manifest["files"] if f["status"] == "backed_up"]), 4)
