@@ -25,6 +25,19 @@ MAX_FILES = 14
 MAX_CONTENT_CHARS = 18000
 MAX_ONE_FILE_CHARS = 2600
 
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?im)^(\s*[\w-]*(?:api_key|apikey|token|password|secret|private_key|"
+    r"access_key|authorization)[\w-]*\s*[:=]\s*)"
+    r"(\x22[^\x22\n]*\x22|'[^'\n]*'|[^\s#\n]+)"
+)
+_SECRET_TOKEN = re.compile(r"(?i)\b(?:ghp_|gho_|github_pat_|sk-)[A-Za-z0-9_-]{12,}\b")
+
+
+def _redact_review_excerpt(content: str) -> str:
+    """Minimize obvious credential leakage into model review context."""
+    lines = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", content)
+    return _SECRET_TOKEN.sub("[REDACTED]", lines)
+
 
 def normalize_repository(identifier: str) -> str:
     """Normalize a GitHub repository URL or owner/name; reject other hosts."""
@@ -177,7 +190,7 @@ def inspect_repository(client, identifier: str) -> dict:
             failed.append(f"{path} (retrieval failed)")
             continue
         length = min(MAX_ONE_FILE_CHARS, budget)
-        snippet = body[:length]
+        snippet = _redact_review_excerpt(body[:length])
         summary.append(
             f"\n--- UNTRUSTED FILE CONTENT: {path} "
             f"({len(body)} chars; {'partial' if len(body) > length else 'complete'}) ---\n{snippet}"
