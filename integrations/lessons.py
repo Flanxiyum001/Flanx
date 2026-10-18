@@ -26,7 +26,7 @@ LIMIT = 2000
 
 def _safe(value, limit):
     """Keep text inside a code-free single line without broken Markdown."""
-    return str(value).replace("\\", "\\\\").replace("`", "'").replace("\n", " ").replace("\r", " ")[:limit]
+    return str(value).replace("\\", "'").replace("`", "'").replace("\n", " ").replace("\r", " ")[:limit]
 
 
 def _reply_prefix(repository):
