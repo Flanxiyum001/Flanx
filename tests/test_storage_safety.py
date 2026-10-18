@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
+from io import StringIO
 
 import usage
 import storage_admin
@@ -148,6 +149,16 @@ class UsageStorageTests(unittest.TestCase):
                 json.dump(manifest, handle)
             with self.assertRaises(ValueError):
                 storage_admin.verify_backup(destination)
+
+
+    def test_usage_storage_failure_does_not_abort_successful_reply(self):
+        import main
+        def failed_record(*args):
+            raise usage.UsageStorageError("private diagnostic")
+        with patch("sys.stdout", new_callable=StringIO) as output:
+            self.assertIsNone(main._record_usage_safely(failed_record, "test"))
+        self.assertIn("Usage counters unavailable", output.getvalue())
+        self.assertNotIn("private diagnostic", output.getvalue())
 
 
 if __name__ == "__main__":
