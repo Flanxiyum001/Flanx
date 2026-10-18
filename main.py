@@ -29,7 +29,7 @@ from github import Github, GithubException, UnknownObjectException
 from openai import AsyncOpenAI
 
 from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
-from usage import format_usage, record_llm_usage, record_sandbox_run
+from usage import UsageStorageError, format_usage, record_llm_usage, record_sandbox_run
 from model_router import route_model
 from prefs import get_pref
 
@@ -110,6 +110,15 @@ Rules:
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+def _record_usage_safely(recorder, *args):
+    """Keep a usage-file problem from discarding a valid AI/sandbox result."""
+    try:
+        recorder(*args)
+    except UsageStorageError:
+        # Never log preference contents, response data, or provider credentials.
+        print("⚠️ Usage counters unavailable; continuing without recording this event.")
+
+
 def web_search(query: str) -> str:
     """Live web lookup so Flanx can use current documentation and recent fixes."""
     try:
@@ -190,7 +199,7 @@ async def generate_patch(
         )
         served_model = getattr(completion, "model", None) or model
         if getattr(completion, "usage", None) is not None:
-            record_llm_usage(served_model, completion.usage)
+            _record_usage_safely(record_llm_usage, served_model, completion.usage)
         content = completion.choices[0].message.content or ""
         patch = strip_code_fences(content)
         if not is_non_english(patch, original_code):
@@ -605,7 +614,7 @@ async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
     )
     served_model = getattr(completion, "model", None) or model
     if getattr(completion, "usage", None) is not None:
-        record_llm_usage(served_model, completion.usage)
+        _record_usage_safely(record_llm_usage, served_model, completion.usage)
     return (completion.choices[0].message.content or "").strip() or "I couldn't produce a response that time. Try asking me again."
 
 
@@ -637,7 +646,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             asyncio.to_thread(run_code, original_code),
         )
         baseline_report = baseline.for_prompt("baseline run")
-        record_sandbox_run(baseline)
+        _record_usage_safely(record_sandbox_run, baseline)
         if not baseline.ok:
             await ctx.send(f"⚠️ **Sandbox unreachable — aborting.** {baseline.error}")
             return
@@ -680,7 +689,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
                 f"🔄 Validating the patch in the free sandbox (attempt {attempt}/{FIX_ATTEMPTS})..."
             )
             validation = await asyncio.to_thread(run_code, raw_patch)
-            record_sandbox_run(validation)
+            _record_usage_safely(record_sandbox_run, validation)
             if validation.passed:
                 break
             retry_feedback = (
