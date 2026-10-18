@@ -223,10 +223,21 @@ def _write_manifest(target: Path, manifest: dict) -> None:
                 pass
 
 
-def backup(destination: str, *, expected_existing=()) -> dict:
-    """Back up real, validated files; refuse invalid sources and old destinations."""
+def backup(destination: str, *, expected_existing=(), allow_missing=()) -> dict:
+    """Back up validated files; missing stores require an explicit operator decision."""
+    expected = set(expected_existing)
+    allowed_missing = set(allow_missing)
+    known = set(STATE_PATHS)
+    if not expected.issubset(known) or not allowed_missing.issubset(known):
+        raise ValueError("Unknown expected or allowed-missing store")
+    if expected & allowed_missing:
+        raise ValueError("A store cannot be both expected-existing and allowed-missing")
     source_inventory = inventory(expected_existing=expected_existing)
     for item in source_inventory:
+        if item["status"] == "missing" and item["name"] not in allowed_missing:
+            raise ValueError(
+                "Missing store requires explicit --allow-missing classification: " + item["name"]
+            )
         if item["status"] not in {"missing", "valid_empty", "valid_records"}:
             raise ValueError(
                 "Backup preflight failed for " + item["name"] + ": " + item["status"]
@@ -239,6 +250,7 @@ def backup(destination: str, *, expected_existing=()) -> dict:
         "format_version": MANIFEST_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "complete": False, "files": [],
+        "allowed_missing_stores": sorted(allowed_missing),
     }
     try:
         for item in source_inventory:
@@ -303,6 +315,11 @@ def verify_backup(directory: str) -> dict:
             or not isinstance(manifest.get("files"), list)):
         raise ValueError("Invalid or incomplete backup manifest")
     expected = set(STATE_PATHS)
+    allowed_missing = manifest.get("allowed_missing_stores")
+    if (not isinstance(allowed_missing, list)
+            or any(not isinstance(name, str) or name not in expected for name in allowed_missing)
+            or len(set(allowed_missing)) != len(allowed_missing)):
+        raise ValueError("Invalid allowed-missing policy in backup manifest")
     seen, backup_names = set(), set()
     verified = missing = 0
     for entry in manifest["files"]:
@@ -313,6 +330,8 @@ def verify_backup(directory: str) -> dict:
             raise ValueError("Duplicate or invalid backup manifest entry")
         seen.add(name)
         if entry.get("status") == "missing":
+            if name not in allowed_missing:
+                raise ValueError("Missing source lacks explicit allow-missing decision: " + name)
             if "backup" in entry or entry.get("history") != "unknown":
                 raise ValueError("Invalid missing-source entry")
             missing += 1
@@ -361,13 +380,18 @@ def main() -> int:
         choices=tuple(STATE_PATHS),
         help="Require a previously known store to exist during inventory/backup",
     )
+    parser.add_argument(
+        "--allow-missing", action="append", default=[],
+        choices=tuple(STATE_PATHS),
+        help="Explicitly classify a currently missing store as not required for this recovery point",
+    )
     args = parser.parse_args()
     if args.verify_backup:
         result = verify_backup(args.verify_backup)
     elif args.inventory:
         result = inventory(expected_existing=args.expect_existing)
     else:
-        result = backup(args.backup_dir, expected_existing=args.expect_existing)
+        result = backup(args.backup_dir, expected_existing=args.expect_existing, allow_missing=args.allow_missing)
     print(json.dumps(result, indent=2))
     if args.inventory and any(
         item["status"] not in {"missing", "valid_empty", "valid_records"}
