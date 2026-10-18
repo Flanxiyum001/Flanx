@@ -279,7 +279,8 @@ class UsageStorageTests(unittest.TestCase):
         corrupt = storage_admin._inspect("preferences", prefs)
         self.assertEqual(corrupt["status"], "corrupt")
         self.assertTrue(corrupt["exists"])
-        self.assertNotIn("sha256", corrupt)
+        self.assertEqual(len(corrupt["sha256"]), 64)
+        self.assertTrue(corrupt["readable"])
         directory = storage_admin._inspect("lessons_db", self.temp.name)
         self.assertEqual(directory["status"], "invalid_path")
         invalid_parent = storage_admin._inspect(
