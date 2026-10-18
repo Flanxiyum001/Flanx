@@ -2,6 +2,7 @@
 from __future__ import annotations
 import re
 from learning import LessonStorageError, add_verified_lesson, list_verified_lessons
+from authz import GITHUB_ACCESS_DENIED, github_user_allowed
 NAME = "lessons"
 DESCRIPTION = "record and retrieve explicitly verified project lessons"
 USAGE = ["flanx lessons owner/repo", "flanx lesson owner/repo | failure | root cause | prevention | evidence"]
@@ -34,6 +35,10 @@ def _reply_prefix(repository):
 
 
 async def handle(event, payload: dict) -> str:
+    # Lessons can influence later repair prompts; only trusted operators may
+    # add or read them to avoid memory poisoning and private project disclosure.
+    if not github_user_allowed(event.author_id):
+        return GITHUB_ACCESS_DENIED
     if payload["action"] == "invalid":
         return "Use `flanx lesson owner/repo | failure | root cause | prevention | evidence`. Only record a lesson after verifying the root cause; never include secrets."
     if payload["action"] == "add":
