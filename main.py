@@ -244,6 +244,10 @@ def open_pull_request(
     file_path = validate_target_path(file_path)
     branch = f"flanx-fix-{int(datetime.now(timezone.utc).timestamp())}"
     base_branch = repo.default_branch
+    if expected_file_sha:
+        latest = repo.get_contents(file_path, ref=base_branch)
+        if isinstance(latest, list) or latest.sha != expected_file_sha:
+            raise ValueError("The source file changed during validation; no branch was created.")
     base = repo.get_branch(base_branch)
     repo.create_git_ref(ref=f"refs/heads/{branch}", sha=base.commit.sha)
 
