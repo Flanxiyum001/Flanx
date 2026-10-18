@@ -19,6 +19,27 @@ class MaxChatTriggerTests(unittest.TestCase):
         self.assertEqual(_strip_name_trigger("flanx stats"), "stats")
         self.assertEqual(_strip_name_trigger("hey flanx"), "hey")
 
+    def test_sandbox_error_diagnostics_route_to_general_chat(self):
+        messages = (
+            "Matrix exception: Error code: 405",
+            "the sandbox health check returned HTTP 405",
+            "Max, investigate why the OnlineCompiler API is failing",
+            "what does error code 405 mean?",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                intent, payload = chat_intent(message)
+                self.assertEqual(intent, "general")
+                self.assertEqual(payload["prompt"], message)
+
+    def test_explicit_file_repair_still_routes_to_fix(self):
+        intent, payload = chat_intent(
+            "fix src/app.py in owner/repo: handle HTTP 405 errors"
+        )
+        self.assertEqual(intent, "fix")
+        self.assertEqual(payload["repo"], "owner/repo")
+        self.assertEqual(payload["file"], "src/app.py")
+
 
 if __name__ == "__main__":
     unittest.main()
