@@ -841,7 +841,9 @@ def compiler_for_target(file_path: str) -> str | None:
     suffix = file_path.rsplit(".", 1)[-1].lower()
     return {
         "py": "python-3.14",
-        "js": "nodejs-24",
+        # OnlineCompiler's native sync API supports TypeScript/Deno, not Node.
+        # JavaScript can run in Deno, but Node-only APIs may be incompatible.
+        "js": "typescript-deno",
         "ts": "typescript-deno",
         "go": "go-1.26",
         "rb": "ruby-4.0",
