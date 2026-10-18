@@ -383,9 +383,17 @@ FIX_VERB_RE = re.compile(
 
 
 def _strip_name_trigger(text: str) -> "str | None":
-    """'flanx help me with this' -> 'help me with this'; None when Flanx is not addressed."""
-    match = CHAT_NAME_RE.match((text or "").strip())
-    return match.group(1).strip() if match else None
+    """Remove Max's name while preserving a greeting such as 'hi' from 'hi max'."""
+    cleaned = (text or "").strip()
+    match = CHAT_NAME_RE.match(cleaned)
+    if not match:
+        return None
+    remainder = match.group(1).strip()
+    if not remainder:
+        greeting = re.match(r"^(hey|hi|hello|yo|oi)\s+(?:max|flanx)[!,.]?$", cleaned, re.IGNORECASE)
+        if greeting:
+            return greeting.group(1)
+    return remainder
 
 
 def _extract_repo(text: str) -> "str | None":
@@ -551,7 +559,7 @@ async def on_message(message):
                 opener = "Yo! 👋"
             await channel.send(
                 f"{opener} I'm Max — I patch code on GitHub, search the web, keep time "
-                "and take notes for you. Try `flanx help` for the full menu."
+                "and take notes for you. Try `max help` for the full menu."
             )
         elif intent == "brain":
             repo = payload["repo"]
