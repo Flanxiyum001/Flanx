@@ -193,9 +193,10 @@ startup does not migrate or delete legacy JSON. A missing database is new
 empty storage; an existing invalid/unreadable SQLite file causes an error.
 The built-in `sqlite3` library requires no new dependency.
 
-**Railway volume prerequisite:** Provision and attach a *real* persistent
-volume to the service before cutover, verify the mount path and writable
-filesystem, and configure `MAX_LESSONS_DB` to a file on the mount.
+**Railway volume prerequisite:** First inventory, extract, and independently
+verify recoverable copies of existing data *outside* the running ephemeral
+container. Only then attach a real volume, restore the checked copies to that
+mount, and configure `MAX_LESSONS_DB` to a file on it.
 `/data/max_lessons.sqlite3` is only an example if the service really has
 a Railway volume mounted at `/data`. An absolute path or `/data` prefix
 does not prove persistence. Use one writer service against this local SQLite
@@ -203,6 +204,44 @@ database; do not share it through an unsuitable network volume.
 Preferences remain JSON: configure `FLANX_PREFS_FILE` (for example
 `/data/flanx_prefs.json` on a verified volume) separately. This change
 does not modify `prefs.py`.
+
+**Storage preflight (no production changes without approval):**
+
+The proposed `storage_admin.py` utility inventories all four stores and
+makes a validated offline backup without printing lesson text, notes, or usage
+values:
+
+```sh
+python storage_admin.py --inventory
+python storage_admin.py --backup-dir /safe/new-backup-dir
+python storage_admin.py --verify-backup /safe/new-backup-dir
+```
+
+Run these commands only in the environment that actually contains the real
+state files; a local repository checkout or new container is **not** a
+production backup. An inventory distinguishes missing paths (historical
+existence unknown), valid empty files, valid files with records, corrupt files,
+unreadable files, and inaccessible paths. If a store is known to have existed,
+supply `--expect-existing lessons_db` (or another store name, repeating the
+flag as necessary) when inventorying/backing up; missing expected stores block
+backup. A file not present at its current path does not prove it never existed.
+
+The SQLite snapshot uses the online backup API and includes committed WAL
+data. The manifest records source paths, backup checksums, counts, and
+integrity results; verification works on copies without reading originals.
+Reject incomplete or all-missing backups and preserve partial results for
+diagnosis. **Copy the complete verified backup directory and its manifest to
+durable restricted storage outside Railway before any deployment or volume
+operation.** A manifest is not a cryptographic signature: independently
+preserve trusted hashes and restrict backup access.
+
+To migrate safely, stop or quiesce all writes, capture a final consistent
+snapshot, restore to a prepared volume, compare file hashes and record counts,
+then change configured paths and deploy under explicit approval. Recheck
+persistence after startup and a controlled restart. If failure occurs, keep
+both old backups and the new volume untouched, and preserve current data
+before any rollback. Never mount an empty volume or restart/redeploy merely
+to gain filesystem access to current ephemeral state.
 
 **Before cutover (bot stopped, no concurrent lesson writes):**
 
@@ -220,8 +259,11 @@ does not modify `prefs.py`.
    `distinct_signatures`, `inserted`, `updated`,
    `skipped_identical_source_duplicates`, and `conflicting_records`.
    Identical repeated records count as explicit skips; divergent duplicates
-   cause a clear error. Import rejects ID or signature collisions with
-   *different* destination identities rather than overwriting them.
+   cause a clear error. A rerun with matching destination records does not
+   rewrite them. If a source record differs from an existing destination
+   record (even when ID/signature match), migration refuses to overwrite
+   potentially newer SQLite data. The historical `updated` report count
+   denotes matched destination records, not SQL UPDATE executions.
 4. The runtime keeps at most **500** lessons. Migration refuses to run if
    the source has more than 500 distinct signatures or if existing destination
    records plus new imports would exceed 500. **Nothing is pruned during
