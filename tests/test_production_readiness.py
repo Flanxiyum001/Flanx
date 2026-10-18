@@ -165,6 +165,40 @@ class ModelAndErrorTests(unittest.TestCase):
                 self.assertNotIn(secret, safe_provider_error(err))
 
 
+class GitHubPatchWorkflowTests(unittest.TestCase):
+    def test_stale_source_blocks_branch_creation_and_update(self):
+        remote = MagicMock()
+        remote.default_branch = "main"
+        remote.get_contents.return_value = SimpleNamespace(sha="newer-sha")
+        with self.assertRaisesRegex(ValueError, "source file changed"):
+            main.open_pull_request(
+                remote, "src/app.py", "print(1)", "fix", "smoke check",
+                expected_file_sha="older-sha",
+            )
+        remote.create_git_ref.assert_not_called()
+        remote.update_file.assert_not_called()
+
+    def test_patch_update_only_occurs_on_new_feature_branch(self):
+        remote = MagicMock()
+        remote.default_branch = "main"
+        remote.get_branch.return_value = SimpleNamespace(
+            commit=SimpleNamespace(sha="base-commit"))
+        remote.get_contents.return_value = SimpleNamespace(sha="same-sha")
+        remote.create_pull.return_value = SimpleNamespace(
+            html_url="https://github.com/owner/repo/pull/9")
+        main.open_pull_request(
+            remote, "src/app.py", "print(2)", "fix", "sandbox-ok",
+            expected_file_sha="same-sha",
+        )
+        self.assertEqual(remote.create_git_ref.call_count, 1)
+        branch = remote.update_file.call_args.kwargs["branch"]
+        self.assertNotEqual(branch, "main")
+        self.assertEqual(remote.create_pull.call_args.kwargs["head"], branch)
+        self.assertEqual(
+            remote.update_file.call_args.kwargs["sha"], "same-sha"
+        )
+
+
 class GitHubAccessControlTests(unittest.TestCase):
     def test_missing_or_malformed_allowlist_fails_closed(self):
         self.assertFalse(github_user_allowed(1234, {}))
