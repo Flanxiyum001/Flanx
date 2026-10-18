@@ -63,18 +63,40 @@ class LearningTests(unittest.TestCase):
     def test_migration_and_rerun(self):
         lesson = self.add()
         self.write_json([lesson])
-        original = open(self.json_path, "rb").read()
-        self.assertEqual(learning.migrate_json(self.json_path)['distinct_signatures'], 1)
-        self.assertEqual(learning.migrate_json(self.json_path), 1)
+        with open(self.json_path, "rb") as handle:
+            original = handle.read()
+        expected = {"source_records": 1, "distinct_signatures": 1,
+                    "inserted": 0, "updated": 1,
+                    "skipped_identical_source_duplicates": 0, "conflicting_records": 0}
+        first = learning.migrate_json(self.json_path)
+        second = learning.migrate_json(self.json_path)
+        self.assertEqual(first, expected)
+        self.assertEqual(second, expected)
         self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 1)
-        self.assertEqual(open(self.json_path, "rb").read(), original)
+        with open(self.json_path, "rb") as handle:
+            self.assertEqual(handle.read(), original)
+
+    def test_migration_new_database_and_idempotent_rerun(self):
+        source_lesson = self.add()
+        self.write_json([source_lesson, source_lesson])
+        with patch.object(learning, "LESSONS_DB", os.path.join(self.temp.name, "import.sqlite")):
+            first = learning.migrate_json(self.json_path)
+            self.assertEqual(first, {"source_records": 2, "distinct_signatures": 1,
+                                     "inserted": 1, "updated": 0,
+                                     "skipped_identical_source_duplicates": 1,
+                                     "conflicting_records": 0})
+            second = learning.migrate_json(self.json_path)
+            self.assertEqual(second, {**first, "inserted": 0, "updated": 1})
+            stored = learning.list_verified_lessons("owner/repo")
+            self.assertEqual([row["id"] for row in stored], [source_lesson["id"]])
 
     def test_malformed_and_invalid_migration(self):
         with open(self.json_path, "w") as handle:
             handle.write("{broken")
         with self.assertRaises(ValueError):
             learning.migrate_json(self.json_path)
-        self.assertEqual(open(self.json_path).read(), "{broken")
+        with open(self.json_path) as handle:
+            self.assertEqual(handle.read(), "{broken")
         self.write_json([{"repository": "owner/repo"}])
         with self.assertRaisesRegex(ValueError, "record 0"):
             learning.migrate_json(self.json_path)
@@ -83,11 +105,12 @@ class LearningTests(unittest.TestCase):
     def test_migration_transaction_rollback(self):
         a = self.add(failure="one")
         b = self.add(failure="two")
+        before = learning.list_verified_lessons("owner/repo")
         b["id"] = a["id"]
         self.write_json([a, b])
-        with self.assertRaises(learning.LessonStorageError):
+        with self.assertRaisesRegex(ValueError, "Conflicting source ID"):
             learning.migrate_json(self.json_path)
-        self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 2)
+        self.assertEqual(learning.list_verified_lessons("owner/repo"), before)
 
     def test_storage_error_visible(self):
         with patch.object(learning, "LESSONS_DB", self.temp.name):
@@ -117,10 +140,12 @@ class LearningTests(unittest.TestCase):
         source = [{**base, "id": f"id-{i}", "failure": f"issue-{i}"}
                   for i in range(501)]
         self.write_json(source)
-        before = open(self.json_path, "rb").read()
+        with open(self.json_path, "rb") as handle:
+            before = handle.read()
         with self.assertRaisesRegex(ValueError, "maximum is 500"):
             learning.migrate_json(self.json_path)
-        self.assertEqual(open(self.json_path, "rb").read(), before)
+        with open(self.json_path, "rb") as handle:
+            self.assertEqual(handle.read(), before)
         self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 1)
 
     def test_identical_duplicates_are_reported(self):
@@ -164,13 +189,39 @@ class LearningTests(unittest.TestCase):
         self.add()
         exported = os.path.join(self.temp.name, "export.json")
         self.assertEqual(learning.export_json(exported), 1)
-        self.assertEqual(len(json.load(open(exported))["lessons"]), 1)
-        original = open(exported, "rb").read()
+        with open(exported, encoding="utf-8") as handle:
+            self.assertEqual(len(json.load(handle)["lessons"]), 1)
+        with open(exported, "rb") as handle:
+            original = handle.read()
         with self.assertRaises(learning.LessonStorageError):
             learning.export_json(exported)
-        self.assertEqual(open(exported, "rb").read(), original)
+        with open(exported, "rb") as handle:
+            self.assertEqual(handle.read(), original)
         self.assertEqual(learning.export_json(exported, overwrite=True), 1)
         self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 1)
+
+    def test_export_cannot_replace_sqlite_using_alias(self):
+        self.add()
+        alias = os.path.join(self.temp.name, "database-alias.json")
+        os.link(self.path, alias)
+        with self.assertRaisesRegex(ValueError, "SQLite database"):
+            learning.export_json(alias, overwrite=True)
+        self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 1)
+        self.assertEqual(os.listdir(self.temp.name).count("database-alias.json"), 1)
+        self.assertFalse(any(name.startswith(".lessons-export-")
+                             for name in os.listdir(self.temp.name)))
+
+    def test_failed_export_cleans_temporary_file(self):
+        self.add()
+        destination = os.path.join(self.temp.name, "export.json")
+        with open(destination, "w", encoding="utf-8") as handle:
+            handle.write("original content")
+        with self.assertRaises(learning.LessonStorageError):
+            learning.export_json(destination)
+        with open(destination, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "original content")
+        self.assertFalse(any(name.startswith(".lessons-export-")
+                             for name in os.listdir(self.temp.name)))
 
     def test_export_refuses_missing_or_invalid_database(self):
         with patch.object(learning, "LESSONS_DB", os.path.join(self.temp.name, "missing.sqlite")):
