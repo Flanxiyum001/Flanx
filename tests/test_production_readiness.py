@@ -9,7 +9,7 @@ import main
 import free_sandbox
 import model_router
 from authz import github_user_allowed, GITHUB_ACCESS_DENIED
-from integrations import repos
+from integrations import repos, lessons
 from provider_errors import configured_model_issue, safe_provider_error
 from repo_review import (
     extract_repository, inspect_repository, normalize_repository,
@@ -167,6 +167,20 @@ class GitHubAccessControlTests(unittest.TestCase):
                 result = asyncio.run(repos.handle(event, {"action": "list", "page": 1}))
         self.assertEqual(result, GITHUB_ACCESS_DENIED)
         github.assert_not_called()
+
+    def test_untrusted_actor_cannot_read_or_poison_verified_lessons(self):
+        event = SimpleNamespace(author_id=8)
+        with patch.dict("os.environ", {"MAX_GITHUB_ALLOWED_USER_IDS": "7"}):
+            with patch.object(lessons, "add_verified_lesson") as write:
+                with patch.object(lessons, "list_verified_lessons") as read:
+                    denied_read = asyncio.run(lessons.handle(
+                        event, {"action": "list", "repository": "owner/repo"}))
+                    denied_write = asyncio.run(lessons.handle(
+                        event, {"action": "add", "repository": "owner/repo"}))
+        self.assertEqual(denied_read, GITHUB_ACCESS_DENIED)
+        self.assertEqual(denied_write, GITHUB_ACCESS_DENIED)
+        read.assert_not_called()
+        write.assert_not_called()
 
     def test_private_repo_inspection_never_fetches_source_contents(self):
         repo = SimpleNamespace(full_name="owner/private", private=True)
