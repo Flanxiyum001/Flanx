@@ -348,26 +348,28 @@ class LearningTests(unittest.TestCase):
         with self.assertRaises(learning.LessonStorageError):
             self.add()
 
-    def test_long_discord_empty_and_error(self):
+    @patch.object(discord_lessons, "github_user_allowed", return_value=True)
+    def test_long_discord_empty_and_error(self, _allowed):
         repo = "a" * 600 + "/" + "b" * 600
-        reply = asyncio.run(discord_lessons.handle(None, {"action": "list", "repository": repo}))
+        reply = asyncio.run(discord_lessons.handle(type("Operator", (), {"author_id": 7})(), {"action": "list", "repository": repo}))
         self.assertLessEqual(len(reply), 2000)
         self.assertTrue(reply.endswith("yet."))
         with patch.object(discord_lessons, "list_verified_lessons",
                           side_effect=learning.LessonStorageError("x" * 3000)):
-            reply = asyncio.run(discord_lessons.handle(None, {"action": "list", "repository": repo}))
+            reply = asyncio.run(discord_lessons.handle(type("Operator", (), {"author_id": 7})(), {"action": "list", "repository": repo}))
             self.assertLessEqual(len(reply), 2000)
 
-    def test_discord_boundaries(self):
+    @patch.object(discord_lessons, "github_user_allowed", return_value=True)
+    def test_discord_boundaries(self, _allowed):
         for i in range(8):
             self.add(repo="a" * 100 + "/" + "b" * 100,
                      failure=str(i) + "x" * 799, cause="c" * 800,
                      prevention="p" * 800, evidence="e" * 800)
         repo = "a" * 100 + "/" + "b" * 100
-        reply = asyncio.run(discord_lessons.handle(None, {"action": "list", "repository": repo}))
+        reply = asyncio.run(discord_lessons.handle(type("Operator", (), {"author_id": 7})(), {"action": "list", "repository": repo}))
         self.assertLessEqual(len(reply), 2000)
         self.assertRegex(reply, r"Showing \d+ of \d+ lessons; \d+ omitted\.$")
-        saved = asyncio.run(discord_lessons.handle(None, {"action": "add",
+        saved = asyncio.run(discord_lessons.handle(type("Operator", (), {"author_id": 7})(), {"action": "add",
             "repository": repo, "failure": "f" * 800, "root_cause": "c" * 800,
             "prevention": "p" * 800, "evidence": "e" * 800}))
         self.assertLessEqual(len(saved), 2000)
