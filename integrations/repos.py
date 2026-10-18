@@ -4,6 +4,7 @@ import asyncio, os, re
 from github import Github, GithubException
 from prefs import get_pref, set_pref
 from authz import GITHUB_ACCESS_DENIED, github_user_allowed
+from repo_review import _redact_review_excerpt
 NAME = "repos"
 DESCRIPTION = "list accessible GitHub repos, choose a default, and inspect project instructions"
 USAGE = ["flanx repos", "flanx use owner/repo", "flanx current repo", "flanx inspect owner/repo"]
@@ -56,7 +57,7 @@ def _inspect(repository: str) -> str:
                 import base64
                 body = base64.b64decode(item.content).decode("utf-8", errors="replace")
             else: body = item.decoded_content.decode("utf-8", errors="replace")
-            summary.append(f"**{label}:**\n{body[:limit]}")
+            summary.append(f"**{label}:**\n{_redact_review_excerpt(body[:limit])}")
         except GithubException as exc:
             if exc.status != 404: raise
     summary.append("_Reconnaissance only: no files changed and no code was executed._")
