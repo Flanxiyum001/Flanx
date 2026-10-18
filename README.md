@@ -1,8 +1,9 @@
 # Max
 
-Max is your self-correcting Discord coding companion. It pulls a file from GitHub, recalls past
-lessons, searches the live web, proves the fix inside a **free** OnlineCompiler.io
-sandbox, learns from the result, and opens a pull request — all from a Discord command.
+Max is a Discord-first coding companion. For supported source files, it retrieves
+repository code, gathers context, runs a **single-file sandbox smoke check**, and
+opens a PR only when that check passes. A passing smoke check does **not** prove
+the entire repository builds, passes tests, or behaves correctly.
 
 ```
 max fix src/app.py in owner/repo: add retry logic around the HTTP call
@@ -17,14 +18,40 @@ max fix src/app.py in owner/repo: add retry logic around the HTTP call
    (Steps 2–4 are independent, so Max runs them **concurrently** — the slowest one
    sets the pace instead of the sum of all three.)
 5. Ask the LLM for a complete replacement file (raw code, no markdown fences).
-6. Re-run the patched file in the sandbox. On a failure the **retry ladder** kicks in:
-   one more attempt at temperature 0 (on `AI_RETRY_MODEL` if set) with the failure log
-   attached. Only after all attempts fail is the lesson written to the brain and no
-   branch pushed.
-7. On success, write the lesson to the brain, push a branch and open a PR.
+6. Perform local Python syntax validation (for .py) and a single-file remote
+   sandbox smoke run. Retry at most `FLANX_FIX_ATTEMPTS` times; stop if it
+   cannot pass.
+7. If the generated code changed, validation passed, and the original GitHub file
+   is unchanged, create a fresh branch and open a PR. **Do not** write to the
+   default branch or claim integration tests/CI passed.
+   Automatic brain-file writing is suspended for safety. Existing memory remains
+   readable, and verified lessons can be recorded explicitly.
 
 All blocking work (PyGithub, sandbox HTTP, web search) runs in threads so the Discord
 gateway never stalls.
+
+## Repository review and safe repair
+
+- \`max https://github.com/owner/repo\` asks which action you want.
+- \`max review https://github.com/owner/repo\` fetches actual GitHub metadata,
+  a bounded directory tree, and a sample of README/configuration/source/test files.
+  It reports **only inspected evidence**; no target files are modified.
+- \`max analyze this repository's architecture: owner/repo\` uses the same
+  read-only inspection path.
+- Private repositories are not automatically passed to an AI model for review.
+  The bot can confirm metadata access, but full private-code review is blocked
+  pending an explicitly approved secure process.
+- \`max fix src/app.py in owner/repo: handle invalid input\` requests a change
+  on a dedicated branch. A valid target path and explicit edit intent are required.
+  Automatic sandbox smoke checks are limited to documented standalone
+  \`.py\`, \`.js\`, \`.ts\`, \`.go\`, and \`.rb\` executions; imports, application
+  integration and CI need independent review. Use \`!update_repo\` for other
+  file types or larger repository-wide changes.
+
+AI gateway responses and sandbox HTTP errors are categorized without exposing
+authorization headers or raw upstream error bodies. An absent/invalid key or
+model will block the operation; no unverified fallback provider is called.
+The SDK uses a bounded timeout and one automatic retry for transient failures.
 
 ## Project Max model routing
 
@@ -51,8 +78,10 @@ The routing module is network-independent and can be tested with:
 | File | Purpose |
 | --- | --- |
 | `main.py` | Discord bot: commands, prompts, PR flow |
-| `free_sandbox.py` | OnlineCompiler.io execution + `brain_memory.txt` read/write |
+| `free_sandbox.py` | OnlineCompiler.io execution and read-only brain memory by default |
 | `requirements.txt` | `discord.py`, `openai`, `PyGithub`, `requests`, `ddgs` |
+| `repo_review.py` | Bounded, read-only GitHub repository inspection and safe path normalization |
+| `provider_errors.py` | Safe FreeLLMAPI configuration/HTTP error messages without sensitive response text |
 | `knowledge.md` | Repo-level directive that steers Freebuff/Codebuff agents handling `tasks/*.md` |
 | `usage.py` | Persistent LLM token/cost counters and monthly sandbox-quota tracking |
 | `prefs.py` | Per-user companion preferences: timezone + personal notes (JSON) |
@@ -171,8 +200,8 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `AI_API_KEY` | yes | Key for the OpenAI-compatible endpoint |
 | `GITHUB_TOKEN` | yes | Fine-grained PAT with contents + pull-requests write on the target repo |
 | `ONLINE_COMPILER_API_KEY` | yes | Free key from the OnlineCompiler.io dashboard (API Keys page) |
-| `AI_BASE_URL` | no | default `https://freellmapi.co/v1` |
-| `AI_MODEL` | no | default `qwen-2.5-coder-32b` |
+| `AI_BASE_URL` | **yes** | Your verified, self-hosted FreeLLMAPI OpenAI-compatible URL ending in `/v1`; no public-host fallback |
+| `AI_MODEL` | no | default `auto` (only when supported by the configured gateway); select verified model via `GET /v1/models` |
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
 | `FLANX_DEFAULT_REPO` | no | default `owner/repo` used by chat mode when a message omits it |
@@ -375,20 +404,22 @@ itself and are always English.
 - **LLM:** call count, prompt/completion/total tokens, per-model breakdown, and
   estimated USD cost. Cost is `$0` by design while you run on the free token pool —
   set `AI_INPUT_PRICE_PER_M` / `AI_OUTPUT_PRICE_PER_M` if you move to a paid endpoint
-  (OpenRouter lists `qwen-2.5-coder-32b` at $0.66 / $1.00 per 1M tokens).
+  (never assume a given provider or model is free without checking its account).
 - **Sandbox:** runs used this calendar month against the free plan's 100,000 quota,
   with pass rate and remaining balance; counters reset on month rollover.
-- The file lives on the host, so on Railway a redeploy resets it unless you point
-  `FLANX_USAGE_FILE` at a persistent volume.
+- The file must live on an attached, verified Railway volume (e.g. via
+  `FLANX_USAGE_FILE`), or it may be replaced on redeployment.
 
 **Retry ladder:** when a generated patch fails sandbox validation, Max regenerates
 at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the exact failure log
-injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts. Only the final
-failure is written to the brain, so the memory log stays signal, not noise.
+injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts.
+Automatic commits to `brain_memory.txt` are disabled to avoid modifying a
+default branch without human approval.
 
 ## The brain
 
-`brain_memory.txt` in the target repository is Max's long-term memory. Every run
-appends a timestamped line (failures and successes), it is trimmed to ~12KB so it always
-fits in one prompt, and it is committed straight to the default branch so you can watch
-the bot learn in the GitHub history.
+`brain_memory.txt` is a legacy GitHub-hosted memory file that Max can read when
+present. Automatic writes directly to `main` or `master` are blocked.
+Use `max lesson owner/repo | failure | root cause | prevention | evidence`
+to record an evidence-backed lesson in persistent SQLite, after verifying the
+underlying issue. This history is separate from GitHub PR review.
