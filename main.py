@@ -318,29 +318,29 @@ def github_file_url(repo_name: str, branch: str, path: str) -> str:
 # Chat mode: "@Flanx …" or "flanx …" with no prefix
 # --------------------------------------------------------------------------
 CHAT_HELP = (
-    "👋 **Flanx chat mode** — just talk to me, no prefix needed:\n"
-    "• `flanx help me with src/app.js in owner/repo — <what to change>`\n"
-    "• `@Flanx fix src/app.js in owner/repo: <what to change>`\n"
-    "• `flanx search <query> for me`\n"
-    "• `flanx what do you remember about owner/repo`\n"
-    "• `flanx stats` — token usage, estimated cost and sandbox quota\n"
-    "• `flanx set timezone Asia/Kolkata` · `flanx what time is it`\n"
-    "• `flanx remember <anything>` · `flanx show notes`\n"
-    "• `flanx integrations` — list the pluggable modules\n"
+    "👋 **Max chat mode** — just talk to me, no prefix needed:\n"
+    "• `max help me with src/app.js in owner/repo — <what to change>`\n"
+    "• `@Max fix src/app.js in owner/repo: <what to change>`\n"
+    "• `max search <query> for me`\n"
+    "• `max what do you remember about owner/repo`\n"
+    "• `max stats` — token usage, estimated cost and sandbox quota\n"
+    "• `max set timezone Asia/Kolkata` · `max what time is it`\n"
+    "• `max remember <anything>` · `max show notes`\n"
+    "• `max integrations` — list the pluggable modules\n"
     "Prefix commands still work: `!flanx_fix`, `!update_repo`, `!flanx_brain`, `!flanx_stats`."
 )
 
 PERSONA_CARD = (
-    "🤖 **I'm Flanx** — your coding companion and personal assistant.\n"
+    "🤖 **I'm Max** — your coding companion and personal assistant.\n"
     "**Coding:** pull a file, patch it with AI, prove it in a free cloud sandbox, open a PR.\n"
-    "**Web:** `flanx search <query> for me`.\n"
-    "**Memory:** a repo brain (`flanx what do you remember about owner/repo`) "
-    "and your private notes (`flanx remember …`).\n"
-    "**Daily stuff:** time in your timezone (`flanx set timezone Asia/Kolkata`), "
-    "usage stats (`flanx stats`).\n"
-    "**Extensions:** `flanx integrations` lists the pluggable modules — drop a new file "
+    "**Web:** `max search <query> for me`.\n"
+    "**Memory:** a repo brain (`max what do you remember about owner/repo`) "
+    "and your private notes (`max remember …`).\n"
+    "**Daily stuff:** time in your timezone (`max set timezone Asia/Kolkata`), "
+    "usage stats (`max stats`).\n"
+    "**Extensions:** `max integrations` lists the pluggable modules — drop a new file "
     "into `integrations/` to add one.\n"
-    "No prefix needed — just start with `flanx` or tag me."
+    "No prefix needed — just start with `max` or tag me. (`flanx` remains a supported alias.)"
 )
 
 FILE_EXT_PATTERN = (
@@ -349,7 +349,7 @@ FILE_EXT_PATTERN = (
 )
 FILE_PATH_RE = re.compile(rf"\b[\w][\w./-]*\.(?:{FILE_EXT_PATTERN})\b", re.IGNORECASE)
 REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
-CHAT_NAME_RE = re.compile(r"^\s*(?:hey\s+|yo\s+|oi\s+)?flanx\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|hi|hello|yo|oi)\s+)?(?:max|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
 MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
 STATS_RE = re.compile(
@@ -370,7 +370,7 @@ HOWAREYOU_RE = re.compile(
 THANKS_RE = re.compile(r"^\s*(?:thanks|thank\s+you|thx|ty|cheers)\b.*$", re.IGNORECASE)
 GREETING_RE = re.compile(
     r"^\s*(?:yo|hi|hey|hello|sup|howdy|hii+)\b"
-    r"(?:\s+(?:yo|hi|hey|there|sup|bro|man|dude|flanx|guys))?\s*$"
+    r"(?:\s+(?:yo|hi|hey|there|sup|bro|man|dude|max|flanx|guys))?\s*$"
     r"|^good\s+(?:morning|afternoon|evening)\b.*$",
     re.IGNORECASE,
 )
@@ -383,9 +383,17 @@ FIX_VERB_RE = re.compile(
 
 
 def _strip_name_trigger(text: str) -> "str | None":
-    """'flanx help me with this' -> 'help me with this'; None when Flanx is not addressed."""
-    match = CHAT_NAME_RE.match((text or "").strip())
-    return match.group(1).strip() if match else None
+    """Remove Max's name while preserving a greeting such as 'hi' from 'hi max'."""
+    cleaned = (text or "").strip()
+    match = CHAT_NAME_RE.match(cleaned)
+    if not match:
+        return None
+    remainder = match.group(1).strip()
+    if not remainder:
+        greeting = re.match(r"^(hey|hi|hello|yo|oi)\s+(?:max|flanx)[!,.]?$", cleaned, re.IGNORECASE)
+        if greeting:
+            return greeting.group(1)
+    return remainder
 
 
 def _extract_repo(text: str) -> "str | None":
@@ -472,9 +480,9 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
 # --------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    print(f"🤖 Flanx online as {bot.user} (chat mode + free sandbox + cloud task staging)")
+    print(f"🤖 Max online as {bot.user} (chat mode + free sandbox + cloud task staging)")
     await bot.change_presence(
-        activity=discord.Game(name="just say 'flanx …' · !flanx_fix · !update_repo")
+        activity=discord.Game(name="just say 'max …' · !flanx_fix · !update_repo")
     )
 
 
@@ -550,8 +558,8 @@ async def on_message(message):
             else:
                 opener = "Yo! 👋"
             await channel.send(
-                f"{opener} I'm Flanx — I patch code on GitHub, search the web, keep time "
-                "and take notes for you. Try `flanx help` for the full menu."
+                f"{opener} I'm Max — I patch code on GitHub, search the web, keep time "
+                "and take notes for you. Try `max help` for the full menu."
             )
         elif intent == "brain":
             repo = payload["repo"]

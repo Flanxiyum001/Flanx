@@ -60,12 +60,12 @@ The routing module is network-independent and can be tested with:
 
 ## GitHub repository workflows
 
-Use the chat trigger (mention Max or prefix a message with `flanx`) for these actions:
+Use the chat trigger by mentioning **Max** or starting a message with `max` (the old `flanx` trigger remains supported for compatibility):
 
-- `flanx repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `flanx repos 2` opens the next page.
-- `flanx use owner/repo` — verify access and save a per-user default repository.
-- `flanx current repo` — show your saved repository.
-- `flanx inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
+- `max repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `max repos 2` opens the next page. (`flanx repos` still works.)
+- `max use owner/repo` — verify access and save a per-user default repository.
+- `max current repo` — show your saved repository.
+- `max inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
 
 Repository discovery is read-only. The token can only list repositories permitted by its GitHub scopes and organization policies. Per-user settings are stored in the existing local JSON preferences file and may not survive redeploys without persistent storage.
 
@@ -77,25 +77,25 @@ Repository discovery is read-only. The token can only list repositories permitte
 - `!flanx_brain <owner/repo>` — print what Flanx remembers for that repository
 - `!flanx_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
-All of these also work as plain chat (`flanx …` / `@Flanx …`) — see **Chat mode** below.
+The legacy `!flanx_*` commands remain available; for plain chat use `max …` or mention `@Max` — see **Chat mode** below.
 
 ## Chat mode (no prefix needed)
 
-Talk to Flanx in plain chat — it answers when you **mention it** (`@Flanx …`) or start a
-message with the word `flanx` (case-insensitive, `hey flanx`/`flanx,` also work):
+Talk to Max in plain chat — it answers when you **mention it** (`@Max …`) or start a
+message with the word `max` (case-insensitive; `hi max`, `hey max`, `hello max`, and `max,` work). The old `flanx` trigger remains a backward-compatible alias:
 
-| You type | Flanx does |
+| You type | Max does |
 | --- | --- |
-| `flanx help me with src/app.js in owner/repo — add retry logic` | runs the full `!flanx_fix` repair pipeline |
-| `@Flanx fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
-| `flanx search python 3.14 changes for me` | live web search, results posted back |
-| `flanx what do you remember about owner/repo` | prints that repo's brain memory |
-| `flanx stats` / `flanx how many tokens have you used` | usage: tokens, cost, sandbox quota |
-| `flanx yo sup` / `flanx how are you` / `flanx who are you` | friendly companion replies (no fix-request nagging) |
-| `flanx set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
-| `flanx what time is it` | current time in your saved timezone (or `flanx time in America/New_York`) |
-| `flanx remember <anything>` / `flanx show notes` | personal notes, stored per user |
-| `flanx help` | usage card |
+| `max help me with src/app.js in owner/repo — add retry logic` | runs the full `!flanx_fix` repair pipeline |
+| `@Max fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
+| `max search python 3.14 changes for me` | live web search, results posted back |
+| `max what do you remember about owner/repo` | prints that repo's brain memory |
+| `max stats` / `max how many tokens have you used` | usage: tokens, cost, sandbox quota |
+| `hi max` / `max how are you` / `max who are you` | friendly companion replies (no fix-request nagging) |
+| `max set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
+| `max what time is it` | current time in your saved timezone (or `flanx time in America/New_York`) |
+| `max remember <anything>` / `max show notes` | personal notes, stored per user |
+| `max help` | usage card |
 
 Parsing pulls out the `owner/repo` and the file path automatically; set
 `FLANX_DEFAULT_REPO=owner/repo` and you can omit the repo. **Casual chat never gets the
@@ -105,7 +105,7 @@ don't address Flanx are ignored.
 
 ### Companion behaviour
 
-Flanx recognises greetings (`yo sup`, `good morning`), `how are you`, `who are you`,
+Max recognises greetings (`hi max`, `yo sup`, `good morning`), `how are you`, `who are you`,
 `thanks`, time/timezone requests and personal notes — all answered conversationally
 instead of being treated as broken GitHub commands. Timezones and notes are stored per
 Discord user in `flanx_prefs.json` (git-ignored; point `FLANX_PREFS_FILE` at a
