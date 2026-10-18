@@ -58,6 +58,17 @@ The routing module is network-independent and can be tested with:
 | `prefs.py` | Per-user companion preferences: timezone + personal notes (JSON) |
 | `integrations/` | Pluggable integration modules (`clock`, `notes`, `_template`) with auto-discovery |
 
+## GitHub repository workflows
+
+Use the chat trigger (mention Max or prefix a message with `flanx`) for these actions:
+
+- `flanx repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `flanx repos 2` opens the next page.
+- `flanx use owner/repo` — verify access and save a per-user default repository.
+- `flanx current repo` — show your saved repository.
+- `flanx inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
+
+Repository discovery is read-only. The token can only list repositories permitted by its GitHub scopes and organization policies. Per-user settings are stored in the existing local JSON preferences file and may not survive redeploys without persistent storage.
+
 ## Commands
 
 - `!flanx_fix <owner/repo> <path/to/file.py> <what to change>` — full repair cycle
