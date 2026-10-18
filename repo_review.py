@@ -109,7 +109,19 @@ def _candidate_files(paths: list[str]) -> list[str]:
         else:
             priority = 10
         return priority, path.count("/"), path
-    return sorted(paths, key=order)[:MAX_FILES]
+    def allowed(path: str) -> bool:
+        lower = path.lower()
+        parts = lower.split("/")
+        if any(part in {".env", ".git", ".ssh", "secrets", "credentials"}
+               or part.startswith(".env.") for part in parts):
+            return False
+        if lower in priorities:
+            return True
+        if lower.startswith(("tests/", "test/", "__tests__/", "src/", "app/", "lib/")):
+            return lower.endswith((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".md"))
+        return lower.endswith((".py", ".js", ".ts", ".go", ".rs")) and "/" not in lower
+
+    return sorted((path for path in paths if allowed(path)), key=order)[:MAX_FILES]
 
 
 def inspect_repository(client, identifier: str) -> dict:
@@ -143,7 +155,7 @@ def inspect_repository(client, identifier: str) -> dict:
         )
         return {
             "name": repository.full_name, "branch": branch, "private": True,
-            "files": [], "failed": [], "truncated": bool(tree.truncated),
+            "files": [], "failed": [], "truncated": bool(getattr(tree, "truncated", False)),
             "context": "\n".join(summary)[:MAX_CONTENT_CHARS],
         }
     for path in _candidate_files(file_paths):
@@ -183,7 +195,7 @@ def inspect_repository(client, identifier: str) -> dict:
     return {
         "name": repository.full_name, "branch": branch, "private": False,
         "files": inspected, "failed": failed,
-        "truncated": bool(tree.truncated) or len(file_paths) > MAX_TREE_ENTRIES
+        "truncated": bool(getattr(tree, "truncated", False)) or len(file_paths) > MAX_TREE_ENTRIES
         or len(file_paths) > len(inspected),
         "context": "\n".join(summary)[:MAX_CONTENT_CHARS + 2000],
     }
