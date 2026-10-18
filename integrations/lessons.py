@@ -1,7 +1,7 @@
 """Record and retrieve evidence-backed repository lessons."""
 from __future__ import annotations
 import re
-from learning import add_verified_lesson, list_verified_lessons
+from learning import LessonStorageError, add_verified_lesson, list_verified_lessons
 NAME = "lessons"
 DESCRIPTION = "record and retrieve explicitly verified project lessons"
 USAGE = ["flanx lessons owner/repo", "flanx lesson owner/repo | failure | root cause | prevention | evidence"]
@@ -27,13 +27,16 @@ async def handle(event, payload: dict) -> str:
     if payload["action"] == "add":
         try:
             lesson = add_verified_lesson(payload["repository"], payload["failure"], payload["root_cause"], payload["prevention"], payload["evidence"])
-        except ValueError as exc:
+        except (ValueError, LessonStorageError) as exc:
             return f"Couldn't save that lesson: {exc}."
         return f"Saved verified lesson for `{lesson['repository']}`.\n**Prevention:** {lesson['prevention']}\n**Evidence:** {lesson['evidence']}"
-    lessons = list_verified_lessons(payload["repository"])
+    try:
+        lessons = list_verified_lessons(payload["repository"])
+    except LessonStorageError as exc:
+        return f"Couldn't read verified lessons: {str(exc)[:250]}"
     if not lessons:
         return f"No verified lessons stored for `{payload['repository']}` yet."
-    lines = [f"**Verified lessons for `{payload['repository']}`**"]
+    lines = [f"**Verified lessons for `{payload['repository'][:150]}`**"]
     total_chars = len(lines[0])
     shown = 0
     for index, lesson in enumerate(lessons, 1):
@@ -50,4 +53,4 @@ async def handle(event, payload: dict) -> str:
         shown += 1
     if shown < len(lessons):
         lines.append(f"Showing {shown} of {len(lessons)} lessons; review these before requesting the list again.")
-    return "\n".join(lines)
+    return "\n".join(lines)[:2000]
