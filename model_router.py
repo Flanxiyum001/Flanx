@@ -57,7 +57,7 @@ def route_model(
 def configured_routes(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return effective routes for diagnostics without exposing any secrets."""
     env = os.environ if environ is None else environ
-    fallback = env.get("AI_MODEL", "").strip() or "qwen-2.5-coder-32b"
+    fallback = env.get("AI_MODEL", "").strip() or "auto"
     return {
         task: route_model(task, fallback=fallback, environ=env)
         for task in TASK_ENV_VARS
