@@ -115,7 +115,7 @@ class UsageStorageTests(unittest.TestCase):
                     with open(path, "rb") as handle:
                         self.assertEqual(handle.read(), content)
                 with self.assertRaises(FileExistsError):
-                    storage_admin.backup(destination)
+                    storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
 
 
     def test_backup_verification_rejects_modified_copy(self):
@@ -129,7 +129,7 @@ class UsageStorageTests(unittest.TestCase):
             with open(prefs, "w", encoding="utf-8") as handle:
                 json.dump({"users": {}}, handle)
             destination = os.path.join(self.temp.name, "backup")
-            manifest = storage_admin.backup(destination)
+            manifest = storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             self.assertEqual(storage_admin.verify_backup(destination), {
                 "status": "verified", "files_verified": 1, "sources_missing": 3,
             })
@@ -152,7 +152,7 @@ class UsageStorageTests(unittest.TestCase):
             "usage": os.path.join(self.temp.name, "missing-usage.json"),
         }):
             destination = os.path.join(self.temp.name, "backup")
-            manifest = storage_admin.backup(destination)
+            manifest = storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             self.assertEqual(storage_admin.verify_backup(destination)["files_verified"], 1)
             row = next(item for item in manifest["files"] if item["name"] == "lessons_db")
             self.assertEqual(row["lesson_count"], 1)
@@ -170,7 +170,7 @@ class UsageStorageTests(unittest.TestCase):
             with open(prefs_path, "w", encoding="utf-8") as handle:
                 json.dump({"users": {}}, handle)
             destination = os.path.join(self.temp.name, "backup")
-            storage_admin.backup(destination)
+            storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             path = os.path.join(destination, "manifest.json")
             with open(path, encoding="utf-8") as handle:
                 manifest = json.load(handle)
@@ -225,7 +225,7 @@ class UsageStorageTests(unittest.TestCase):
         }):
             destination = os.path.join(self.temp.name, "empty-backup")
             with self.assertRaisesRegex(ValueError, "no source data"):
-                storage_admin.backup(destination)
+                storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             self.assertTrue(os.path.isdir(destination))
 
 
@@ -306,7 +306,7 @@ class UsageStorageTests(unittest.TestCase):
         }):
             destination = os.path.join(self.temp.name, "reject-backup")
             with self.assertRaisesRegex(ValueError, "preflight failed"):
-                storage_admin.backup(destination)
+                storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             self.assertFalse(os.path.exists(destination))
             with open(prefs, "rb") as handle:
                 self.assertEqual(handle.read(), b'{"users":')
@@ -342,7 +342,7 @@ class UsageStorageTests(unittest.TestCase):
                 "usage": os.path.join(self.temp.name, "absent-usage.json"),
             }):
                 backup_dir = os.path.join(self.temp.name, "wal-backup")
-                manifest = storage_admin.backup(backup_dir)
+                manifest = storage_admin.backup(backup_dir, allow_missing=list(storage_admin.STATE_PATHS))
                 self.assertEqual(manifest["files"][0]["lesson_count"], 1)
                 self.assertEqual(storage_admin.verify_backup(backup_dir)["files_verified"], 1)
                 with sqlite3.connect(os.path.join(backup_dir, "lessons_db.sqlite3")) as saved:
@@ -391,7 +391,7 @@ class UsageStorageTests(unittest.TestCase):
             "usage": os.path.join(self.temp.name, "missing-usage.json"),
         }):
             destination = os.path.join(self.temp.name, "backup")
-            manifest = storage_admin.backup(destination)
+            manifest = storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             self.assertEqual(manifest["files"][0]["record_count"], 0)
             self.assertEqual(storage_admin.verify_backup(destination)["files_verified"], 1)
 
@@ -406,7 +406,7 @@ class UsageStorageTests(unittest.TestCase):
             "usage": os.path.join(self.temp.name, "absent-usage.json"),
         }):
             destination = os.path.join(self.temp.name, "backup")
-            manifest = storage_admin.backup(destination)
+            manifest = storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
             with open(os.path.join(destination, "unexpected.txt"), "w") as handle:
                 handle.write("unrelated file")
             with self.assertRaisesRegex(ValueError, "Unexpected files"):
