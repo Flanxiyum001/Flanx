@@ -167,11 +167,14 @@ def _inspect(name: str, raw_path: str, expected_existing: bool = False) -> dict:
                 "reason": "not_a_regular_file"}
     item.update(exists=True, bytes=file_stat.st_size)
     try:
+        # Even malformed but readable stores get a content fingerprint
+        # for recovery comparison; validation never erases the source.
+        item["sha256"] = _sha256(path)
+        item["readable"] = True
         if name == "lessons_db":
             counts = _sqlite_details(path)
         else:
             counts = _validate_json(name, path)
-        item["sha256"] = _sha256(path)
     except (PermissionError, OSError, sqlite3.OperationalError):
         return {**item, "status": "unreadable", "validation": "failed"}
     except (ValueError, UnicodeError, sqlite3.DatabaseError):
