@@ -1,6 +1,6 @@
 """Evidence-backed, repository-scoped lessons for Project Max."""
 from __future__ import annotations
-import json, os, threading
+import json, os, re, threading
 from datetime import datetime, timezone
 LESSONS_FILE = os.getenv("MAX_LESSONS_FILE", "max_lessons.json")
 MAX_LESSONS = 500
@@ -30,8 +30,8 @@ def add_verified_lesson(repository: str, failure: str, root_cause: str, preventi
     fields = {key: str(value).strip()[:MAX_FIELD_CHARS] for key, value in fields.items()}
     if not all(fields.values()):
         raise ValueError("repository, failure, root cause, prevention, and evidence are required")
-    if "/" not in fields["repository"]:
-        raise ValueError("repository must use owner/repo format")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", fields["repository"]):
+        raise ValueError("repository must use exactly owner/repo format")
     with _lock:
         lessons = _load()
         signature = tuple(fields[k].casefold() for k in ("repository", "failure", "root_cause"))
