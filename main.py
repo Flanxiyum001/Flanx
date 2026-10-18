@@ -378,11 +378,11 @@ HELP_RE = re.compile(r"^\s*(?:help|what\s+can\s+you\s+do|commands)\s*$", re.IGNO
 # Troubleshooting questions should be answered conversationally, not sent to the
 # code-repair pipeline just because a pasted log happens to contain a file path.
 DIAGNOSTIC_RE = re.compile(
-    r"\\b(?:what\\s+does|what\\s+is|why\\s+(?:does|is|did|would)|explain|diagnos(?:e|is|ing)|"
-    r"investigat(?:e|ing)|troubleshoot|error\\s+code|status\\s+code|http\\s*405|"
-    r"matrix\\s+exception|exception|\\b(?:error|failure)\\b.*\\b(?:mean|cause|happen|occur)|"
-    r"(?:sandbox|api|connection|bot).{0,35}\\b(?:error|fail(?:ed|ure)?|broken|down|not\\s+working|health|status)\\b|"
-    r"\\bcheck\\s+(?:the\\s+)?(?:error|logs?|sandbox|api|connection|health|status)\\b)",
+    r"\b(?:what\s+does|what\s+is|why\s+(?:does|is|did|would)|explain|diagnos(?:e|is|ing)|"
+    r"investigat(?:e|ing)|troubleshoot|error\s+code|status\s+code|http\s*405|"
+    r"matrix\s+exception|exception|\b(?:error|failure)\b.*\b(?:mean|cause|happen|occur)|"
+    r"(?:sandbox|api|connection|bot).{0,35}\b(?:error|fail(?:ed|ure)?|broken|down|not\s+working|health|status)\b|"
+    r"\bcheck\s+(?:the\s+)?(?:error|logs?|sandbox|api|connection|health|status)\b)",
     re.IGNORECASE,
 )
 FIX_VERB_RE = re.compile(
@@ -481,7 +481,8 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     if DIAGNOSTIC_RE.search(stripped) and not (
         repo and file_path and FIX_VERB_RE.match(stripped)
     ):
-        return "general", {"prompt": stripped}
+        # Preserve question marks/punctuation in the conversational request.
+        return "general", {"prompt": (text or "").strip()}
     # Only enter the code-repair workflow when the user gives a repair/update verb,
     # a repository, or a file path. Ordinary questions should receive an answer.
     if not (repo or file_path or FIX_VERB_RE.match(stripped)):
