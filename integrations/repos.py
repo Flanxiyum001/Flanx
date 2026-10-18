@@ -63,7 +63,7 @@ def _inspect(repository: str) -> str:
     return "\n\n".join(summary)[:1800]
 
 async def handle(event, payload: dict) -> str:
-    if not github_user_allowed(event.author_id):
+    if not github_user_allowed(getattr(event, "author_id", None)):
         return GITHUB_ACCESS_DENIED
     action = payload["action"]
     if action == "current":
