@@ -144,6 +144,10 @@ class ReadOnlyReviewTests(unittest.TestCase):
         self.assertFalse(repo.fetched)
         self.assertEqual(evidence["files"], [])
         self.assertNotIn("def run():", evidence["context"])
+        # Private repository paths must not be enumerated either.
+        with patch.object(repo, "get_git_tree", side_effect=AssertionError("tree fetched")):
+            again = inspect_repository(client, "owner/repo")
+        self.assertEqual(again["files"], [])
 
 
 class ModelAndErrorTests(unittest.TestCase):
