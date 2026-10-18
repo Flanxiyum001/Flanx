@@ -135,6 +135,77 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 20)
 
 
+    def test_first_concurrent_writes_wait_for_schema_initialization(self):
+        """A second writer must not use the newly created file before DDL commits.
+
+        Intercept the first sqlite connect *after it creates the file* and
+        wait for the other writer to finish (or time out). Without the
+        initialization lock the second writer sees 'no such table: lessons'.
+        """
+        self.assertFalse(os.path.exists(self.path))
+        start = threading.Barrier(3)
+        other_finished = threading.Event()
+        first_connected = threading.Event()
+        capture_lock = threading.Lock()
+        first = [True]
+        errors = []
+        results = []
+        real_connect = sqlite3.connect
+
+        def gated_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            with capture_lock:
+                is_first = first[0]
+                first[0] = False
+            if is_first:
+                first_connected.set()
+                # The peer cannot finish while initialization is locked.
+                # In the buggy code, it finishes with "no such table".
+                other_finished.wait(timeout=2)
+            return connection
+
+        def write(number):
+            try:
+                start.wait(timeout=5)
+                results.append(self.add(failure=f"first-wave-{number}"))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                if not first_connected.is_set():
+                    first_connected.set()
+                else:
+                    other_finished.set()
+
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(2)]
+        try:
+            with patch.object(learning.sqlite3, "connect", side_effect=gated_connect):
+                for thread in threads:
+                    thread.start()
+                start.wait(timeout=5)
+                self.assertTrue(first_connected.wait(timeout=5))
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+        finally:
+            start.abort()
+            other_finished.set()
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len({row["id"] for row in results}), 2)
+        stored = learning.list_verified_lessons("owner/repo")
+        self.assertCountEqual([row["failure"] for row in stored],
+                              ["first-wave-0", "first-wave-1"])
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='lessons'"
+            ).fetchone()[0], "lessons")
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM lessons").fetchone()[0], 2)
+
     def test_migration_rejects_more_than_500_without_changes(self):
         base = self.add()
         source = [{**base, "id": f"id-{i}", "failure": f"issue-{i}"}
