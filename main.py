@@ -236,8 +236,10 @@ def open_pull_request(
     content: str,
     goal: str,
     validation_report: str,
+    *,
+    expected_file_sha: "str | None" = None,
 ) -> str:
-    """Create a branch from the default branch, write the patch, open a PR."""
+    """Create a feature-branch PR after confirming the source has not changed."""
     file_path = validate_target_path(file_path)
     branch = f"flanx-fix-{int(datetime.now(timezone.utc).timestamp())}"
     base_branch = repo.default_branch
@@ -250,6 +252,8 @@ def open_pull_request(
     if isinstance(current, list):
         raise ValueError(f"`{file_path}` is a directory on `{branch}` — Flanx needs a single file.")
     file_sha = current.sha
+    if expected_file_sha and expected_file_sha != file_sha:
+        raise ValueError("The source file changed during validation; aborting the patch.")
 
     for attempt in range(2):
         try:
@@ -276,8 +280,9 @@ def open_pull_request(
             f"**Goal:** {goal}\n\n"
             f"**Sandbox validation:**\n```\n"
             f"{clip(validation_report, 800)}\n```\n\n"
-            "_Opened by Flanx — the patch was executed and exit-code checked in a free "
-            "OnlineCompiler.io sandbox before this branch was pushed._"
+            "_Opened by Max. A single-file smoke execution passed in the external "
+            "sandbox; repository integration tests, CI, and full behavior were NOT "
+            "verified by this operation. Review before merging._"
         ),
         head=branch,
         base=base_branch,
@@ -794,10 +799,32 @@ async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
     return (completion.choices[0].message.content or "").strip() or "I couldn't produce a response that time. Try asking me again."
 
 
+def compiler_for_target(file_path: str) -> str | None:
+    """Use the provider's documented compiler ID for single-file smoke tests."""
+    suffix = file_path.rsplit(".", 1)[-1].lower()
+    return {
+        "py": "python-3.14",
+        "js": "nodejs-24",
+        "ts": "typescript-deno",
+        "go": "go-1.26",
+        "rb": "ruby-4.0",
+    }.get(suffix)
+
+
 async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str) -> None:
     """Full repair cycle. `ctx` is a command ctx or any Discord messageable with .send()."""
     try:
-        await ctx.send(f"📡 *Jarvis sequence initiated.* Pulling `{file_path}` from `{repo_name}`...")
+        repo_name = normalize_repository(repo_name)
+        file_path = validate_target_path(file_path)
+        compiler = compiler_for_target(file_path)
+        if not compiler:
+            await ctx.send(
+                "Automatic patch validation currently supports .py, .js, .ts, "
+                ".go, and .rb files. Use `!update_repo` to stage other changes "
+                "for independent review instead."
+            )
+            return
+        await ctx.send(f"📡 Fetching `{file_path}` from `{repo_name}`...")
         repo = await asyncio.to_thread(gh.get_repo, repo_name)
         default_branch = repo.default_branch
 
@@ -808,7 +835,13 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
         if isinstance(file_obj, list):
             await ctx.send(f"⚠️ `{file_path}` is a directory — point Flanx at a single file.")
             return
-        original_code = file_obj.decoded_content.decode("utf-8", errors="replace")
+        original_code = file_obj.decoded_content.decode("utf-8")
+        if len(original_code) > 24_000:
+            await ctx.send(
+                "This file exceeds the safe single-file patch context limit. "
+                "No code was sent to the model or sandbox."
+            )
+            return
 
         # 1-3. Memory recall, web research and the sandbox baseline are independent
         # network calls — run them concurrently so the slowest one sets the pace
@@ -819,7 +852,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
         past_memories, live_web_intel, baseline = await asyncio.gather(
             asyncio.to_thread(read_flanx_brain, repo_name),
             asyncio.to_thread(web_search, diagnostic_goal),
-            asyncio.to_thread(run_code, original_code),
+            asyncio.to_thread(run_code, original_code, compiler=compiler),
         )
         baseline_report = baseline.for_prompt("baseline run")
         _record_usage_safely(record_sandbox_run, baseline)
@@ -852,19 +885,33 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
                     model=model, temperature=temperature, retry_feedback=retry_feedback,
                 )
             except Exception as exc:
-                await ctx.send(
-                    f"⚠️ **LLM layer error** (`{model}` @ `{AI_BASE_URL}`): "
-                    f"`{clip(str(exc), 300)}`"
-                )
+                await ctx.send(f"⚠️ **LLM layer error:** {safe_provider_error(exc)}")
                 return
             if not raw_patch.strip():
                 await ctx.send("⚠️ The model returned an empty patch — aborting before any push.")
                 return
+            if raw_patch.rstrip() == original_code.rstrip():
+                await ctx.send(
+                    "The model returned the original file unchanged; no misleading PR was opened."
+                )
+                return
+            if file_path.endswith(".py"):
+                try:
+                    ast.parse(raw_patch, filename=file_path)
+                except SyntaxError:
+                    retry_feedback = (
+                        "The previous patch failed the local Python syntax check. "
+                        "Produce a syntactically valid full file."
+                    )
+                    if attempt < FIX_ATTEMPTS:
+                        continue
+                    await ctx.send("Python syntax validation failed; no branch or PR was created.")
+                    return
 
             await ctx.send(
-                f"🔄 Validating the patch in the free sandbox (attempt {attempt}/{FIX_ATTEMPTS})..."
+                f"🔄 Running single-file sandbox smoke check ({attempt}/{FIX_ATTEMPTS})..."
             )
-            validation = await asyncio.to_thread(run_code, raw_patch)
+            validation = await asyncio.to_thread(run_code, raw_patch, compiler=compiler)
             _record_usage_safely(record_sandbox_run, validation)
             if validation.passed:
                 break
@@ -879,10 +926,10 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
                 f"FAILED patch for `{file_path}` after {FIX_ATTEMPTS} attempt(s) "
                 f"(goal: {diagnostic_goal[:60]}) — sandbox exit {exit_code}: {clip(detail, 140)}"
             )
-            await asyncio.to_thread(update_flanx_brain, repo_name, insight)
+            # Never append a failure log directly to the repository default branch.
             await ctx.send(
-                f"⚠️ **Patch failed sandbox validation after {FIX_ATTEMPTS} attempt(s) — lesson "
-                f"logged to the brain so it is not repeated.**\n"
+                f"⚠️ **Patch failed validation after {FIX_ATTEMPTS} attempt(s).** "
+                "No PR or memory commit was created.\n"
                 f"{validation.for_discord() if validation else 'no run result'}"
             )
             return
@@ -892,23 +939,27 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             f"Fixed `{file_path}` (goal: {diagnostic_goal[:70]}) — "
             "passed sandbox validation with exit code 0."
         )
-        await asyncio.to_thread(update_flanx_brain, repo_name, insight)
-
-        await ctx.send("🚀 Validation clean! Creating the branch and opening the pull request...")
+        await ctx.send("🚀 Single-file smoke check passed. Preparing a reviewable PR...")
         pr_url = await asyncio.to_thread(
             open_pull_request, repo, file_path, raw_patch, diagnostic_goal,
             validation.for_prompt("validation run"),
+            expected_file_sha=file_obj.sha,
         )
 
         await ctx.send(
-            "✅ **Mission complete.** The patch ran cleanly in the sandbox and the brain has "
-            f"been updated.\nReview the PR: {pr_url}"
+            "✅ **PR opened.** A single-file sandbox smoke check passed; repository "
+            f"tests and CI are not verified yet. No default-branch memory write occurred.\n"
+            f"Review the PR: {pr_url}"
         )
 
     except GithubException as exc:
-        await ctx.send(f"⚠️ **GitHub error** `{exc.status}`: {clip(str(exc.data), 300)}")
+        await ctx.send(f"⚠️ GitHub operation failed (HTTP {exc.status}); no successful PR was confirmed.")
+    except ValueError as exc:
+        # These messages arise from local path/repository validation only.
+        await ctx.send(f"⚠️ {clip(str(exc), 240)}")
     except Exception as exc:
-        await ctx.send(f"⚠️ **Matrix exception:** {clip(str(exc), 300)}")
+        print(f"⚠️ Repair operation failed ({type(exc).__name__}).")
+        await ctx.send("⚠️ Repair interrupted. No successful PR was confirmed; check branch state before retrying.")
 
 
 @bot.command(name="flanx_fix")
@@ -923,7 +974,9 @@ async def update_repo(ctx, repo_name: str, file_path: str, *, instruction: str):
     """Stage a task manifest on a fresh branch for Freebuff/Codebuff agents to execute."""
     async with ctx.typing():
         try:
-            await ctx.send(f"📡 *Opening repository grid.* Staging a task manifest for `{repo_name}`...")
+            repo_name = normalize_repository(repo_name)
+            file_path = validate_target_path(file_path)
+            await ctx.send(f"📡 Staging a task manifest for `{repo_name}`...")
             repo = await asyncio.to_thread(gh.get_repo, repo_name)
             base_branch = repo.default_branch
             task_id = int(ctx.message.created_at.timestamp())
@@ -986,9 +1039,12 @@ async def update_repo(ctx, repo_name: str, file_path: str, *, instruction: str):
             await ctx.send(embed=embed)
 
         except GithubException as exc:
-            await ctx.send(f"⚠️ **GitHub error** `{exc.status}`: {clip(str(exc.data), 300)}")
+            await ctx.send(f"⚠️ GitHub staging failed (HTTP {exc.status}).")
+        except ValueError as exc:
+            await ctx.send(f"⚠️ {clip(str(exc), 240)}")
         except Exception as exc:
-            await ctx.send(f"⚠️ **Automation matrix interrupted:** {clip(str(exc), 300)}")
+            print(f"⚠️ Task staging failed ({type(exc).__name__}).")
+            await ctx.send("⚠️ Task staging failed; inspect branch state before retrying.")
 
 
 @bot.command(name="flanx_brain")
