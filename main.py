@@ -256,24 +256,15 @@ def open_pull_request(
     if expected_file_sha and expected_file_sha != file_sha:
         raise ValueError("The source file changed during validation; aborting the patch.")
 
-    for attempt in range(2):
-        try:
-            repo.update_file(
-                path=file_path,
-                message=f"🤖 Flanx fix: {goal[:60]}",
-                content=content if content.endswith("\n") else content + "\n",
-                sha=file_sha,
-                branch=branch,
-            )
-            break
-        except GithubException as exc:
-            if exc.status == 409 and attempt == 0:
-                current = repo.get_contents(file_path, ref=branch)
-                if isinstance(current, list):
-                    raise
-                file_sha = current.sha
-            else:
-                raise
+    # Do not resolve a 409 by using a newer blob SHA: that could overwrite
+    # unrelated edits committed by another actor during validation.
+    repo.update_file(
+        path=file_path,
+        message=f"🤖 Max fix: {goal[:60]}",
+        content=content if content.endswith("\n") else content + "\n",
+        sha=file_sha,
+        branch=branch,
+    )
 
     pull = repo.create_pull(
         title=f"🤖 Flanx automated patch: {file_path}",
