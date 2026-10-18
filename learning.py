@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -50,7 +51,17 @@ def _signature(record):
     return tuple(record[key].casefold() for key in ("repository", "failure", "root_cause"))
 
 
+# Connection setup must be atomic across threads: SQLite creates the file
+# before the first connection has committed its table schema.
+_initialization_lock = threading.Lock()
+
+
 def _connect(*, create=True):
+    with _initialization_lock:
+        return _connect_locked(create=create)
+
+
+def _connect_locked(*, create=True):
     """Open a connection without ever replacing an invalid existing database."""
     connection = None
     try:
