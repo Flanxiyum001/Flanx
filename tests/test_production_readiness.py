@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import main
 import free_sandbox
 import model_router
+from authz import github_user_allowed, GITHUB_ACCESS_DENIED
+from integrations import repos
 from provider_errors import configured_model_issue, safe_provider_error
 from repo_review import (
     extract_repository, inspect_repository, normalize_repository,
@@ -150,6 +152,31 @@ class ModelAndErrorTests(unittest.TestCase):
                 self.assertNotIn(secret, safe_provider_error(err))
 
 
+class GitHubAccessControlTests(unittest.TestCase):
+    def test_missing_or_malformed_allowlist_fails_closed(self):
+        self.assertFalse(github_user_allowed(1234, {}))
+        self.assertFalse(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "invalid"}))
+        self.assertFalse(github_user_allowed(-1, {"MAX_GITHUB_ALLOWED_USER_IDS": "-1"}))
+        self.assertFalse(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "12345"}))
+        self.assertTrue(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "9, 1234,5678"}))
+
+    def test_unknown_discord_actor_cannot_enumerate_github(self):
+        event = SimpleNamespace(author_id=8)
+        with patch.dict("os.environ", {"MAX_GITHUB_ALLOWED_USER_IDS": "7"}):
+            with patch.object(repos, "_github") as github:
+                result = asyncio.run(repos.handle(event, {"action": "list", "page": 1}))
+        self.assertEqual(result, GITHUB_ACCESS_DENIED)
+        github.assert_not_called()
+
+    def test_private_repo_inspection_never_fetches_source_contents(self):
+        repo = SimpleNamespace(full_name="owner/private", private=True)
+        client = SimpleNamespace(get_repo=lambda identifier: repo)
+        with patch.object(repos, "_github", return_value=client):
+            result = repos._inspect("owner/private")
+        self.assertIn("(private)", result)
+        self.assertNotIn("Root entries", result)
+
+
 class SandboxHTTPTests(unittest.TestCase):
     def setUp(self):
         self.key = patch.object(free_sandbox, "SANDBOX_API_KEY", "test-key-for-mocks")
@@ -241,6 +268,30 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
             await main.fix_pipeline(ctx, "owner/repo", "../secrets.py", "fix it")
         fake_github.get_repo.assert_not_called()
         self.assertTrue(ctx.send.await_count)
+
+    async def test_prefix_commands_require_operator(self):
+        ctx = SimpleNamespace(
+            author=SimpleNamespace(id=7),
+            send=AsyncMock(),
+            typing=MagicMock(),
+        )
+        with patch.object(main, "github_user_allowed", return_value=False):
+            await main.flanx_fix.callback(
+                ctx, "owner/repo", "src/app.py", diagnostic_goal="fix"
+            )
+            await main.update_repo.callback(
+                ctx, "owner/repo", "src/app.py", instruction="fix"
+            )
+            await main.flanx_brain.callback(ctx, "owner/repo")
+        self.assertEqual(ctx.send.await_count, 3)
+        for call in ctx.send.await_args_list:
+            self.assertEqual(call.args[0], GITHUB_ACCESS_DENIED)
+
+    async def test_no_ai_base_url_fails_without_network(self):
+        with patch.object(main, "ai_client", None):
+            response = await main.generate_assistant_reply("hi")
+        self.assertIn("AI_BASE_URL", response)
+
 
     async def test_private_review_returns_metadata_only(self):
         evidence = {
