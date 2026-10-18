@@ -34,8 +34,20 @@ async def handle(event, payload: dict) -> str:
     if not lessons:
         return f"No verified lessons stored for `{payload['repository']}` yet."
     lines = [f"**Verified lessons for `{payload['repository']}`**"]
-    for index, lesson in enumerate(lessons[:10], 1):
-        lines.append(f"{index}. **Failure:** {lesson['failure']}\n   **Root cause:** {lesson['root_cause']}\n   **Prevention:** {lesson['prevention']}\n   **Evidence:** {lesson['evidence']}")
-    if len(lessons) > 10:
-        lines.append(f"Showing 10 of {len(lessons)} lessons.")
+    total_chars = len(lines[0])
+    shown = 0
+    for index, lesson in enumerate(lessons, 1):
+        entry = (
+            f"{index}. **Failure:** {lesson['failure'][:180]}\n"
+            f"   **Root cause:** {lesson['root_cause'][:180]}\n"
+            f"   **Prevention:** {lesson['prevention'][:180]}\n"
+            f"   **Evidence:** {lesson['evidence'][:180]}"
+        )
+        if total_chars + len(entry) + 1 > 1750:
+            break
+        lines.append(entry)
+        total_chars += len(entry) + 1
+        shown += 1
+    if shown < len(lessons):
+        lines.append(f"Showing {shown} of {len(lessons)} lessons; review these before requesting the list again.")
     return "\n".join(lines)
