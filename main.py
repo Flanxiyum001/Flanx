@@ -349,7 +349,7 @@ FILE_EXT_PATTERN = (
 )
 FILE_PATH_RE = re.compile(rf"\b[\w][\w./-]*\.(?:{FILE_EXT_PATTERN})\b", re.IGNORECASE)
 REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
-CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|yo|oi)\s+)?(?:max|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|hi|hello|yo|oi)\s+)?(?:max|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
 MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
 STATS_RE = re.compile(
