@@ -239,7 +239,14 @@ def migrate_json(source=None):
             if existing_signature and existing_signature["id"] != record["id"]:
                 raise ValueError(f"Signature collision with different ID: {record['id']}")
             if existing_id or existing_signature:
-                updated += 1
+                # A repeated import is a no-op, not permission to roll back
+                # newer fields or timestamps in the live database.
+                if (existing_id or existing_signature) != record:
+                    raise ValueError(
+                        "Destination lesson differs from migration source; "
+                        "refusing to overwrite existing data"
+                    )
+                updated += 1  # Preserve the legacy count of matched destination rows.
             else:
                 inserted += 1
         if len(current) + inserted > MAX_LESSONS:
@@ -247,14 +254,7 @@ def migrate_json(source=None):
                              f"{len(current)} existing + {inserted} new. "
                              "Export/backup and reconcile into an empty DB or a smaller source copy")
         for record in distinct.values():
-            if record["id"] in by_id:
-                connection.execute(
-                    """UPDATE lessons SET repository=?, failure=?, root_cause=?, prevention=?,
-                       evidence=?, status=?, created_at=?, updated_at=? WHERE id=?""",
-                    (*[record[k] for k in _KEYS], record["status"], record["created_at"],
-                     record["updated_at"], record["id"]),
-                )
-            else:
+            if record["id"] not in by_id:
                 _insert(connection, record)
         connection.commit()
         return {"source_records": len(source_records), "distinct_signatures": len(distinct),
