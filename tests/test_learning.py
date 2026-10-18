@@ -304,6 +304,30 @@ class LearningTests(unittest.TestCase):
             with self.assertRaises(learning.LessonStorageError):
                 learning.list_verified_lessons("owner/repo")
 
+    def test_rerunning_stale_json_cannot_overwrite_newer_sqlite_lesson(self):
+        older = self.add(failure="stale-legacy-source", prevention="old fix")
+        self.write_json([older])
+        newer = self.add(failure="stale-legacy-source", prevention="newer fix")
+        before = learning.list_verified_lessons("owner/repo")
+        self.assertEqual(before[0]["prevention"], "newer fix")
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+            learning.migrate_json(self.json_path)
+        self.assertEqual(learning.list_verified_lessons("owner/repo"), before)
+        with open(self.json_path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["lessons"], [older])
+
+    def test_rerunning_identical_json_does_not_rewrite_destination(self):
+        record = self.add(failure="identical-source")
+        self.write_json([record])
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                "CREATE TRIGGER reject_update BEFORE UPDATE ON lessons "
+                "BEGIN SELECT RAISE(FAIL, 'unexpected rewrite'); END"
+            )
+        result = learning.migrate_json(self.json_path)
+        self.assertEqual(result["inserted"], 0)
+        self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 1)
+
     def test_migration_rollback_on_sql_failure(self):
         original = self.add()
         import sqlite3
