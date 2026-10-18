@@ -405,6 +405,20 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AI_BASE_URL", response)
 
 
+    async def test_malformed_usage_metadata_does_not_discard_successful_reply(self):
+        response = SimpleNamespace(
+            model="auto",
+            choices=[SimpleNamespace(message=SimpleNamespace(content="AI answer is intact"))],
+            usage={"prompt_tokens": "not-a-number"},
+        )
+        fake = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(return_value=response))
+        ))
+        with patch.object(main, "ai_client", fake), \
+             patch.object(main, "record_llm_usage", side_effect=ValueError("sensitive data")):
+            answer = await main.generate_assistant_reply("hello")
+        self.assertEqual(answer, "AI answer is intact")
+
     async def test_malformed_gateway_chat_is_reported_not_crashed(self):
         fake = SimpleNamespace(chat=SimpleNamespace(
             completions=SimpleNamespace(create=AsyncMock(
