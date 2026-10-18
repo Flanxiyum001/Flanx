@@ -80,5 +80,72 @@ class UsageStorageTests(unittest.TestCase):
                     storage_admin.backup(destination)
 
 
+    def test_backup_verification_rejects_modified_copy(self):
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "absent.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "absent.json"),
+            "preferences": os.path.join(self.temp.name, "prefs.json"),
+            "usage": os.path.join(self.temp.name, "absent-usage.json"),
+        }):
+            prefs = storage_admin.FILES["preferences"]
+            with open(prefs, "w", encoding="utf-8") as handle:
+                json.dump({"users": {}}, handle)
+            destination = os.path.join(self.temp.name, "backup")
+            manifest = storage_admin.backup(destination)
+            self.assertEqual(storage_admin.verify_backup(destination), {
+                "status": "verified", "files_verified": 1, "sources_missing": 3,
+            })
+            backed_up = next(row for row in manifest["files"] if row["name"] == "preferences")
+            with open(os.path.join(destination, backed_up["backup"]), "ab") as handle:
+                handle.write(b"tamper")
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                storage_admin.verify_backup(destination)
+            with open(prefs, "r", encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), {"users": {}})
+
+    def test_backup_verification_checks_sqlite_integrity_and_counts(self):
+        db = os.path.join(self.temp.name, "lessons.sqlite3")
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE lessons (id TEXT)")
+            conn.execute("INSERT INTO lessons VALUES ('record-1')")
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": db,
+            "legacy_lessons_json": os.path.join(self.temp.name, "missing.json"),
+            "preferences": os.path.join(self.temp.name, "missing-prefs.json"),
+            "usage": os.path.join(self.temp.name, "missing-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "backup")
+            manifest = storage_admin.backup(destination)
+            self.assertEqual(storage_admin.verify_backup(destination)["files_verified"], 1)
+            row = next(item for item in manifest["files"] if item["name"] == "lessons_db")
+            self.assertEqual(row["lesson_count"], 1)
+            self.assertEqual(row["sha256"], storage_admin._sha256(
+                storage_admin.Path(destination) / row["backup"]))
+
+    def test_backup_verification_rejects_unsafe_or_incomplete_manifest(self):
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "missing.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "missing.json"),
+            "preferences": os.path.join(self.temp.name, "missing-prefs.json"),
+            "usage": os.path.join(self.temp.name, "missing-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "backup")
+            storage_admin.backup(destination)
+            path = os.path.join(destination, "manifest.json")
+            with open(path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            manifest["files"][0]["status"] = "backed_up"
+            manifest["files"][0]["backup"] = "../secret.json"
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaisesRegex(ValueError, "filename"):
+                storage_admin.verify_backup(destination)
+            manifest["files"].pop()
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaises(ValueError):
+                storage_admin.verify_backup(destination)
+
+
 if __name__ == "__main__":
     unittest.main()
