@@ -39,7 +39,7 @@ async def handle(event, payload: dict) -> str:
         return "Use `flanx lesson owner/repo | failure | root cause | prevention | evidence`. Only record a lesson after verifying the root cause; never include secrets."
     # Lessons can influence later repair prompts; only trusted operators may
     # add or read them to avoid memory poisoning and project disclosure.
-    if not github_user_allowed(event.author_id):
+    if not github_user_allowed(getattr(event, "author_id", None)):
         return GITHUB_ACCESS_DENIED
     if payload["action"] == "add":
         try:
