@@ -241,6 +241,11 @@ def read_flanx_brain(repo_name: str, ref: str = "main") -> str:
     """Read Flanx's historical memory log from GitHub."""
     try:
         repo = _client().get_repo(repo_name)
+        if repo.private:
+            return (
+                "Private repository memory is not displayed in Discord by default. "
+                "No memory file contents were retrieved."
+            )
         file_obj = repo.get_contents(BRAIN_FILE, ref=ref)
         content = file_obj.decoded_content.decode("utf-8", errors="replace")
         if len(content) > BRAIN_MAX_CHARS:
