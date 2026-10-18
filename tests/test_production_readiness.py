@@ -307,6 +307,44 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AI_BASE_URL", response)
 
 
+    async def test_malformed_gateway_chat_is_reported_not_crashed(self):
+        fake = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(
+                return_value=SimpleNamespace(choices=[], usage=None)))),
+        )
+        with patch.object(main, "ai_client", fake):
+            reply = await main.generate_assistant_reply("hello")
+        self.assertIn("malformed", reply.lower())
+
+    async def test_malformed_gateway_review_is_not_claimed_complete(self):
+        evidence = {
+            "name": "owner/repo", "private": False, "branch": "main",
+            "files": ["README.md"], "truncated": False, "context": "README data"
+        }
+        fake = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(
+                return_value=SimpleNamespace(choices=[], usage=None)))),
+        )
+        with patch.object(main, "ai_client", fake):
+            reply = await main.generate_review_reply(evidence, "review")
+        self.assertIn("malformed", reply.lower())
+
+
+class DiscordFormattingTests(unittest.TestCase):
+    def test_multichunk_prose_never_exceeds_limit(self):
+        chunks = main.discord_chunks("paragraph\n" * 1000)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(0 < len(chunk) <= 1900 for chunk in chunks))
+
+    def test_long_code_fence_is_balanced_in_every_message(self):
+        fence = chr(96) * 3
+        code = fence + "python\n" + ("print('safe')\n" * 300) + fence
+        chunks = main.discord_chunks(code)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 1900 for chunk in chunks))
+        self.assertTrue(all(chunk.count(fence) % 2 == 0 for chunk in chunks))
+
+
     async def test_private_review_returns_metadata_only(self):
         evidence = {
             "name": "owner/repo", "private": True, "branch": "main",
