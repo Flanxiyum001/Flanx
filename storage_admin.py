@@ -176,6 +176,8 @@ def verify_backup(directory: str) -> dict:
         verified += 1
     if seen != expected:
         raise ValueError("Backup manifest does not cover all state files")
+    if verified == 0:
+        raise ValueError("Backup contains no source data; do not treat it as a verified recovery point")
     return {"status": "verified", "files_verified": verified, "sources_missing": missing}
 
 
