@@ -122,6 +122,19 @@ class ReadOnlyReviewTests(unittest.TestCase):
         self.assertIn("src/app.py", evidence["context"])
         self.assertFalse(evidence["private"])
 
+    def test_obvious_secrets_are_redacted_from_public_review_context(self):
+        repo = FakeRepository()
+        repo.source["src/app.py"] = (
+            'API_KEY = "SENSITIVE-DEMO-SECRET"\n'
+            'AUTH_TOKEN = "another-secret-value"\n'
+            "print('hello')\n"
+        )
+        client = SimpleNamespace(get_repo=lambda name: repo)
+        evidence = inspect_repository(client, "owner/repo")
+        self.assertNotIn("SENSITIVE-DEMO-SECRET", evidence["context"])
+        self.assertNotIn("another-secret-value", evidence["context"])
+        self.assertIn("[REDACTED]", evidence["context"])
+
     def test_private_repo_does_not_read_or_forward_code(self):
         repo = FakeRepository()
         repo.private = True
