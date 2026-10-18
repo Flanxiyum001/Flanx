@@ -276,8 +276,11 @@ def export_json(destination, *, overwrite=False):
     finally:
         connection.close()
 
-    if os.path.abspath(destination) == os.path.abspath(LESSONS_DB):
-        raise ValueError("Export destination must not be the SQLite database")
+    # Refuse aliases, including symlinks and hard links, even with overwrite.
+    if os.path.realpath(destination) == os.path.realpath(LESSONS_DB) or (
+        os.path.exists(destination) and os.path.samefile(destination, LESSONS_DB)
+    ):
+        raise ValueError("Export destination must not refer to the SQLite database")
     import tempfile
     temporary = None
     try:
@@ -298,7 +301,12 @@ def export_json(destination, *, overwrite=False):
         raise LessonStorageError(f"Cannot write export {destination!r}: {exc}") from exc
     finally:
         if temporary and os.path.exists(temporary):
-            os.unlink(temporary)
+            try:
+                os.unlink(temporary)
+            except OSError as exc:
+                raise LessonStorageError(
+                    f"Could not clean up temporary export {temporary!r}: {exc}"
+                ) from exc
 
 
 if __name__ == "__main__":
