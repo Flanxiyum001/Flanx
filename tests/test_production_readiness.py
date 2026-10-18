@@ -12,8 +12,8 @@ from authz import github_user_allowed, GITHUB_ACCESS_DENIED
 from integrations import repos, lessons
 from provider_errors import configured_model_issue, safe_provider_error
 from repo_review import (
-    extract_repository, inspect_repository, normalize_repository,
-    validate_target_path,
+    contains_potential_secret, extract_repository, inspect_repository,
+    normalize_repository, validate_target_path,
 )
 
 
@@ -62,6 +62,15 @@ class RepositoryRoutingTests(unittest.TestCase):
         self.assertEqual(extract_repository(url), "Flanxiyum001/Axiom")
         self.assertIsNone(main._extract_file(url))
         self.assertIsNone(extract_repository("src/app.py"))
+
+    def test_literal_secret_detection_avoids_env_reference_false_positive(self):
+        self.assertFalse(contains_potential_secret(
+            "API_KEY = os.getenv('AI_API_KEY')"
+        ))
+        self.assertFalse(contains_potential_secret("print('hello')"))
+        self.assertTrue(contains_potential_secret(
+            'API_KEY = "a-very-long-embedded-secret-value"'
+        ))
 
     def test_target_path_rejects_escape_and_git_metadata(self):
         for bad in ("../src/app.py", "/etc/passwd", "src/../secret.py",
@@ -376,6 +385,23 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
             reply = await main.generate_assistant_reply("hello")
         self.assertIn("401", reply)
         self.assertNotIn("PRIVATE-KEY", reply)
+
+    async def test_credential_bearing_source_blocks_external_processing(self):
+        context = SimpleNamespace(send=AsyncMock())
+        repository = MagicMock()
+        repository.private = False
+        repository.default_branch = "main"
+        repository.get_contents.return_value = SimpleNamespace(
+            sha="source-sha",
+            decoded_content=b'API_KEY = "this-is-a-fake-sensitive-credential"'
+        )
+        with patch.object(main.gh, "get_repo", return_value=repository), \
+             patch.object(main, "run_code") as sandbox, \
+             patch.object(main, "generate_patch") as model:
+            await main.fix_pipeline(context, "owner/repo", "src/app.py", "fix it")
+        sandbox.assert_not_called()
+        model.assert_not_called()
+        self.assertIn("literal credential", context.send.await_args.args[0])
 
     async def test_private_repair_does_not_fetch_source_or_call_external_services(self):
         ctx = SimpleNamespace(send=AsyncMock())
