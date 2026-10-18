@@ -748,7 +748,13 @@ async def generate_review_reply(inspection: dict, request: str) -> str:
     served = getattr(response, "model", None) or model
     if getattr(response, "usage", None) is not None:
         _record_usage_safely(record_llm_usage, served, response.usage)
-    body = (response.choices[0].message.content or "").strip()
+    try:
+        body = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        return "AI gateway returned a malformed review response; repository evidence was fetched but no review was completed."
+    if not isinstance(body, str):
+        return "AI gateway returned an unsupported review content type."
+    body = body.strip()
     return (
         f"**Read-only review of {name}** "
         f"({len(inspection['files'])} inspected files; "
@@ -758,20 +764,42 @@ async def generate_review_reply(inspection: dict, request: str) -> str:
     )
 
 
-async def send_long_reply(channel, body: str) -> None:
-    """Split explanatory prose at paragraph/word boundaries below Discord limits."""
-    remaining = body.strip()
+def discord_chunks(body: str, limit: int = 1900) -> list[str]:
+    """Keep every chunk inside Discord's limit, balancing Markdown code fences."""
+    if limit < 32:
+        raise ValueError("Discord chunk limit is too small")
+    fence = chr(96) * 3
+    remaining, prefix, in_code = (body or "").strip(), "", False
+    chunks = []
     while remaining:
-        if len(remaining) <= 1850:
-            await channel.send(remaining)
-            return
-        cut = remaining.rfind("\n", 0, 1850)
-        if cut < 500:
-            cut = remaining.rfind(" ", 0, 1850)
-        if cut < 500:
-            cut = 1850
-        await channel.send(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
+        available = limit - len(prefix) - 6  # room for a closing code fence
+        if len(remaining) <= available:
+            piece = prefix + remaining
+            if in_code ^ bool(remaining.count(fence) % 2):
+                piece += "\n" + fence
+            chunks.append(piece)
+            break
+        cut = remaining.rfind("\n", 0, available)
+        if cut < available // 3:
+            cut = remaining.rfind(" ", 0, available)
+        if cut < available // 3:
+            cut = available
+        segment, remaining = remaining[:cut], remaining[cut:]
+        in_code = in_code ^ bool(segment.count(fence) % 2)
+        chunk = prefix + segment
+        if in_code:
+            chunk += "\n" + fence
+            prefix = fence + "\n"
+        else:
+            prefix = ""
+        chunks.append(chunk)
+    return chunks
+
+
+async def send_long_reply(channel, body: str) -> None:
+    """Send bounded chunks, preserving Markdown code-block balance."""
+    for chunk in discord_chunks(body):
+        await channel.send(chunk)
 
 
 async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
@@ -804,7 +832,13 @@ async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
     served_model = getattr(completion, "model", None) or model
     if getattr(completion, "usage", None) is not None:
         _record_usage_safely(record_llm_usage, served_model, completion.usage)
-    return (completion.choices[0].message.content or "").strip() or "I couldn't produce a response that time. Try asking me again."
+    try:
+        answer = completion.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        return "AI gateway returned a malformed chat response; no answer was confirmed."
+    if not isinstance(answer, str):
+        return "AI gateway returned an unsupported chat content type."
+    return answer.strip() or "I couldn't produce a response that time. Try asking me again."
 
 
 def compiler_for_target(file_path: str) -> str | None:
@@ -928,12 +962,6 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
                 f"{validation.for_prompt('failed attempt')}"
             )
         else:
-            exit_code = validation.exit_code if validation and validation.exit_code is not None else "n/a"
-            detail = (validation.stderr or validation.error) if validation else "no run result"
-            insight = (
-                f"FAILED patch for `{file_path}` after {FIX_ATTEMPTS} attempt(s) "
-                f"(goal: {diagnostic_goal[:60]}) — sandbox exit {exit_code}: {clip(detail, 140)}"
-            )
             # Never append a failure log directly to the repository default branch.
             await ctx.send(
                 f"⚠️ **Patch failed validation after {FIX_ATTEMPTS} attempt(s).** "
@@ -943,10 +971,6 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             return
 
         # 6. Success: record the lesson, then branch + PR
-        insight = (
-            f"Fixed `{file_path}` (goal: {diagnostic_goal[:70]}) — "
-            "passed sandbox validation with exit code 0."
-        )
         await ctx.send("🚀 Single-file smoke check passed. Preparing a reviewable PR...")
         pr_url = await asyncio.to_thread(
             open_pull_request, repo, file_path, raw_patch, diagnostic_goal,
