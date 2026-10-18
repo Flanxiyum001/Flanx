@@ -134,7 +134,7 @@ def _sqlite_details(path: Path) -> dict:
         if not LESSON_COLUMNS.issubset(columns):
             raise ValueError("Invalid SQLite lessons schema")
         count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-    return {"record_count": count, "sqlite_integrity": "ok"}
+    return {"record_count": count, "lesson_count": count, "sqlite_integrity": "ok"}
 
 
 def _inspect(name: str, raw_path: str, expected_existing: bool = False) -> dict:
