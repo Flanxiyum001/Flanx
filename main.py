@@ -30,6 +30,7 @@ from openai import AsyncOpenAI
 
 from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
 from usage import format_usage, record_llm_usage, record_sandbox_run
+from model_router import route_model
 
 import integrations  # pluggable modules: drop a file into integrations/ to add one
 
@@ -611,7 +612,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
         validation = None
         raw_patch = ""
         retry_feedback = ""
-        model, temperature = AI_MODEL, 0.1
+        model, temperature = route_model("coding", fallback=AI_MODEL), 0.1
         for attempt in range(1, FIX_ATTEMPTS + 1):
             if attempt == 1:
                 await ctx.send("🧠 Composing the patch from memory + web intel + sandbox trace...")
