@@ -6,9 +6,10 @@ Sandbox (OnlineCompiler.io free tier, verified against their docs):
     Authorization: <your api key>          # no "Bearer" prefix
     {"compiler": "python-3.14", "code": "...", "input": "..."}
 
-Documented free-plan limits: 100,000 runs/month, 30 submissions/minute,
-2 concurrent executions, 30s execution timeout, 100KB code and stdin each,
-64KB output per stream, and **no outbound network inside the sandbox**.
+The provider documents 30 submissions/minute, 2 concurrent executions,
+30s execution timeout, 100KB code and stdin each, 64KB output per stream,
+and **no outbound network inside the sandbox**. Check account quota via
+/api/usage/ because published monthly-limit pages have differed.
 
 The brain lives in ``brain_memory.txt`` inside the repository Flanx works on,
 so every lesson survives restarts and is reviewable in GitHub history.
@@ -182,8 +183,8 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
     if response.status_code == 429:
         return SandboxResult(
             ok=False,
-            error="Sandbox rate limit or monthly free-quota reached (HTTP 429). "
-                  "Free plan: 30 submissions/min, 100k runs/month.",
+            error="Sandbox returned HTTP 429 (rate limit, concurrency, or account quota). "
+                  "Check the provider's /api/usage/ and /api/limits/ endpoints.",
         )
     if response.status_code != 200:
         if response.status_code in {404, 405}:
