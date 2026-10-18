@@ -215,12 +215,12 @@ class LearningTests(unittest.TestCase):
     def test_discord_boundaries(self):
         for i in range(8):
             self.add(repo="a" * 100 + "/" + "b" * 100,
-                     failure="x" * 800 + str(i), cause="c" * 800,
+                     failure=str(i) + "x" * 799, cause="c" * 800,
                      prevention="p" * 800, evidence="e" * 800)
         repo = "a" * 100 + "/" + "b" * 100
         reply = asyncio.run(discord_lessons.handle(None, {"action": "list", "repository": repo}))
         self.assertLessEqual(len(reply), 2000)
-        self.assertRegex(reply, r"Showing \\d+ of \\d+ lessons; \\d+ omitted\\.$")
+        self.assertRegex(reply, r"Showing \d+ of \d+ lessons; \d+ omitted\.$")
         saved = asyncio.run(discord_lessons.handle(None, {"action": "add",
             "repository": repo, "failure": "f" * 800, "root_cause": "c" * 800,
             "prevention": "p" * 800, "evidence": "e" * 800}))
