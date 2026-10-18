@@ -9,3 +9,10 @@ class RepoIntentTests(unittest.TestCase):
     def test_inspection(self): self.assertEqual(repos.match("inspect octo/project"), {"action": "inspect", "repository": "octo/project"})
     def test_unrelated_text_is_ignored(self): self.assertIsNone(repos.match("please explain python decorators"))
 if __name__ == "__main__": unittest.main()
+
+    def test_inspection_sections_have_bounded_content(self):
+        import inspect
+        source = inspect.getsource(repos._inspect)
+        self.assertIn('("AGENTS.md", "Repository instructions", 500)', source)
+        self.assertIn('("README.md", "README overview", 450)', source)
+        self.assertIn('join(names[:30])[:300]', source)
