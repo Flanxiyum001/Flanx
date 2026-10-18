@@ -100,6 +100,7 @@ class UsageStorageTests(unittest.TestCase):
                 "status": "verified", "files_verified": 1, "sources_missing": 3,
             })
             backed_up = next(row for row in manifest["files"] if row["name"] == "preferences")
+            self.assertEqual(backed_up["record_count"], 0)
             with open(os.path.join(destination, backed_up["backup"]), "ab") as handle:
                 handle.write(b"tamper")
             with self.assertRaisesRegex(ValueError, "checksum"):
@@ -163,6 +164,26 @@ class UsageStorageTests(unittest.TestCase):
         self.assertIn("Usage counters unavailable", output.getvalue())
         self.assertNotIn("private diagnostic", output.getvalue())
 
+
+    def test_json_manifest_count_is_verified(self):
+        preferences = os.path.join(self.temp.name, "prefs.json")
+        with open(preferences, "w", encoding="utf-8") as handle:
+            json.dump({"users": {"101": {"prefs": {}, "notes": []}}}, handle)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "missing.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "missing.json"),
+            "preferences": preferences,
+            "usage": os.path.join(self.temp.name, "missing-usage.json"),
+        }):
+            backup_dir = os.path.join(self.temp.name, "backup")
+            manifest = storage_admin.backup(backup_dir)
+            entry = next(row for row in manifest["files"] if row["name"] == "preferences")
+            self.assertEqual(entry["record_count"], 1)
+            entry["record_count"] = 2
+            with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaisesRegex(ValueError, "record count mismatch"):
+                storage_admin.verify_backup(backup_dir)
 
     def test_all_missing_sources_are_not_a_verified_backup(self):
         with patch.dict(storage_admin.FILES, {
