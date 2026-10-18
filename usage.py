@@ -12,6 +12,7 @@ endpoint so the counter reports real spend.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from copy import deepcopy
@@ -66,10 +67,26 @@ def _load() -> dict:
     base = _empty()
     base["llm"].update(data["llm"])
     base["sandbox"].update(data["sandbox"])
-    if not isinstance(base["llm"].get("by_model"), dict):
-        raise UsageStorageError(
-            f"Usage storage at {USAGE_FILE!r} has an invalid llm.by_model field."
-        )
+    llm = base["llm"]
+    counters = ("calls", "prompt_tokens", "completion_tokens", "total_tokens")
+    valid_number = lambda n: isinstance(n, int) and not isinstance(n, bool) and n >= 0
+    if any(not valid_number(llm.get(key, 0)) for key in counters):
+        raise UsageStorageError("Invalid usage counters; refusing to reset or overwrite.")
+    cost = llm.get("cost_usd", 0)
+    if (isinstance(cost, bool) or not isinstance(cost, (int, float))
+            or not math.isfinite(cost) or cost < 0):
+        raise UsageStorageError("Invalid usage cost; refusing to reset or overwrite.")
+    if not isinstance(llm.get("by_model"), dict):
+        raise UsageStorageError("Invalid usage model counters; refusing to reset or overwrite.")
+    for entry in llm["by_model"].values():
+        if (not isinstance(entry, dict)
+                or any(not valid_number(entry.get(key, 0)) for key in counters)):
+            raise UsageStorageError("Invalid per-model usage counters; refusing to overwrite.")
+    for month in base["sandbox"].values():
+        if (not isinstance(month, dict)
+                or any(not valid_number(month.get(key, 0))
+                       for key in ("runs", "passed", "failed"))):
+            raise UsageStorageError("Invalid sandbox usage counters; refusing to overwrite.")
     return base
 
 
