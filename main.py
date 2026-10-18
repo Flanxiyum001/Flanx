@@ -573,8 +573,9 @@ async def on_message(message):
             else:
                 async with channel.typing():
                     results = await asyncio.to_thread(web_search, query)
+                safe_results = clip(results, 1700).replace(chr(96) * 3, "'''")
                 await channel.send(
-                    f"🌐 **Search:** `{clip(query, 120)}`\n```\n{clip(results, 1800)}\n```"
+                    f"🌐 **Search:** `{clip(query, 120)}`\n```\n{safe_results}\n```"
                 )
         elif intent == "stats":
             await channel.send(await asyncio.to_thread(format_usage))
@@ -587,7 +588,7 @@ async def on_message(message):
                 ),
             )
             if reply:
-                await channel.send(reply)
+                await send_long_reply(channel, reply)
         elif intent == "integrations":
             lines = [
                 "🧩 **Installed integrations** — drop a new module into `integrations/` "
@@ -628,7 +629,8 @@ async def on_message(message):
                 )
             else:
                 memory = await asyncio.to_thread(read_flanx_brain, repo)
-                await channel.send(f"🧠 **Brain memory for `{repo}`**\n```\n{clip(memory, 1800)}\n```")
+                safe_memory = clip(memory, 1700).replace(chr(96) * 3, "'''")
+                await channel.send(f"🧠 **Brain memory for `{repo}`**\n```\n{safe_memory}\n```")
         elif intent == "repo_clarify":
             await channel.send(
                 f"I found GitHub repository `{payload['repo']}`. Would you like "
@@ -664,7 +666,7 @@ async def on_message(message):
         elif intent == "general":
             async with channel.typing():
                 reply = await generate_assistant_reply(payload["prompt"], task="general")
-            await channel.send(clip(reply, 1900))
+            await send_long_reply(channel, reply)
         elif intent == "fix":
             repo, file_path, goal = payload["repo"], payload["file"], payload["goal"]
             missing = []
