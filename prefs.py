@@ -46,6 +46,14 @@ def _load() -> dict:
         raise PreferenceStorageError(
             f"Preference storage at {PREFS_FILE!r} has an invalid structure; refusing to reset it."
         )
+    for user in data["users"].values():
+        if (not isinstance(user, dict)
+                or not isinstance(user.get("prefs"), dict)
+                or not isinstance(user.get("notes"), list)
+                or any(not isinstance(note, str) for note in user["notes"])):
+            raise PreferenceStorageError(
+                "Existing preference records are invalid; refusing to reset or overwrite."
+            )
     return data
 
 
