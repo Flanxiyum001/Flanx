@@ -22,6 +22,11 @@ MAX_NOTE_CHARS = 300
 _lock = threading.Lock()
 
 
+class PreferenceStorageError(RuntimeError):
+    """Raised when existing preference data cannot be read safely."""
+
+
+
 def _empty() -> dict:
     return {"users": {}}
 
@@ -30,11 +35,18 @@ def _load() -> dict:
     try:
         with open(PREFS_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        if not isinstance(data.get("users"), dict):
-            raise ValueError("unexpected shape")
-        return data
-    except (FileNotFoundError, ValueError, OSError):
+    except FileNotFoundError:
         return _empty()
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PreferenceStorageError(
+            f"Could not read preference storage at {PREFS_FILE!r}; refusing to reset it."
+        ) from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("users"), dict):
+        raise PreferenceStorageError(
+            f"Preference storage at {PREFS_FILE!r} has an invalid structure; refusing to reset it."
+        )
+    return data
 
 
 def _save(data: dict) -> None:
