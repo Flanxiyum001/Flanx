@@ -128,8 +128,10 @@ def _record_usage_safely(recorder, *args):
     """Keep a usage-file problem from discarding a valid AI/sandbox result."""
     try:
         recorder(*args)
-    except UsageStorageError:
-        # Never log preference contents, response data, or provider credentials.
+    except (UsageStorageError, ValueError, TypeError, OverflowError):
+        # Some compatible gateways return malformed usage metadata. Do not
+        # discard a valid AI/sandbox result just because accounting failed.
+        # Never log preference contents, response data, or credentials.
         print("⚠️ Usage counters unavailable; continuing without recording this event.")
 
 
