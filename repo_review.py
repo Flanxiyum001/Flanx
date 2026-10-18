@@ -38,6 +38,20 @@ def _redact_review_excerpt(content: str) -> str:
     lines = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", content)
     return _SECRET_TOKEN.sub("[REDACTED]", lines)
 
+# Conservative smoke-test guard: only flag likely literal credentials,
+# not ordinary safe lookups such as TOKEN = os.getenv("TOKEN").
+_LITERAL_SECRET = re.compile(
+    r"(?im)^\s*[A-Za-z_]*(?:api_key|token|password|secret|private_key)"
+    r"[A-Za-z_]*\s*[:=]\s*['\"][^'\"\n]{16,}['\"]"
+)
+
+
+def contains_potential_secret(content: str) -> bool:
+    """Block sending likely embedded credentials to external execution/LLM."""
+    return bool(_SECRET_TOKEN.search(content or "") or _LITERAL_SECRET.search(content or ""))
+
+
+
 
 def normalize_repository(identifier: str) -> str:
     """Normalize a GitHub repository URL or owner/name; reject other hosts."""
