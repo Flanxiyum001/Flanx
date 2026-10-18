@@ -322,6 +322,53 @@ class UsageStorageTests(unittest.TestCase):
         with sqlite3.connect(bad) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0], 0)
 
+    def test_wal_commits_are_included_in_sqlite_online_backup(self):
+        db = os.path.join(self.temp.name, "wal.sqlite3")
+        with sqlite3.connect(db) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(learning._SCHEMA)
+            connection.execute(
+                "INSERT INTO lessons (id, repository, failure, root_cause, prevention,"
+                " evidence, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                ("id-wal", "owner/repo", "wal", "root", "prevent", "proof",
+                 "verified", "2026-10-18", "2026-10-18"),
+            )
+            connection.commit()
+            with patch.dict(storage_admin.FILES, {
+                "lessons_db": db,
+                "legacy_lessons_json": os.path.join(self.temp.name, "absent.json"),
+                "preferences": os.path.join(self.temp.name, "absent-prefs.json"),
+                "usage": os.path.join(self.temp.name, "absent-usage.json"),
+            }):
+                backup_dir = os.path.join(self.temp.name, "wal-backup")
+                manifest = storage_admin.backup(backup_dir)
+                self.assertEqual(manifest["files"][0]["lesson_count"], 1)
+                self.assertEqual(storage_admin.verify_backup(backup_dir)["files_verified"], 1)
+                with sqlite3.connect(os.path.join(backup_dir, "lessons_db.sqlite3")) as saved:
+                    self.assertEqual(saved.execute("SELECT failure FROM lessons").fetchone()[0], "wal")
+
+    def test_failed_copy_preserves_partial_directory_and_incomplete_manifest(self):
+        source = os.path.join(self.temp.name, "prefs.json")
+        with open(source, "w", encoding="utf-8") as handle:
+            json.dump({"users": {}}, handle)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "absent.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "absent.json"),
+            "preferences": source,
+            "usage": os.path.join(self.temp.name, "absent-usage.json"),
+        }):
+            target = os.path.join(self.temp.name, "partial")
+            with patch.object(storage_admin.shutil, "copy2", side_effect=OSError("interrupted")):
+                with self.assertRaisesRegex(OSError, "interrupted"):
+                    storage_admin.backup(target)
+            self.assertTrue(os.path.isdir(target))
+            with open(os.path.join(target, "manifest.json"), encoding="utf-8") as handle:
+                self.assertFalse(json.load(handle)["complete"])
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                storage_admin.verify_backup(target)
+            with open(source, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), {"users": {}})
+
     def test_configured_environment_paths_override_defaults(self):
         prefs = os.path.join(self.temp.name, "persistent-data", "prefs.json")
         os.mkdir(os.path.dirname(prefs))
