@@ -428,6 +428,25 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("malformed", reply.lower())
 
 
+    async def test_long_chat_reply_uses_bounded_discord_messages(self):
+        channel = SimpleNamespace(send=AsyncMock(), typing=MagicMock())
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=7, bot=False),
+            content="max explain long example",
+            mentions=[], channel=channel,
+        )
+        answer = ("An example sentence with multiple words.\n" * 180)
+        with patch.object(main, "get_pref", return_value=None), \
+             patch.object(main, "generate_assistant_reply", new_callable=AsyncMock, return_value=answer), \
+             patch.object(main.bot, "process_commands", new_callable=AsyncMock) as commands:
+            await main.on_message(message)
+        self.assertGreater(channel.send.await_count, 1)
+        self.assertTrue(all(
+            len(call.args[0]) <= 1900
+            for call in channel.send.await_args_list
+        ))
+        commands.assert_awaited_once_with(message)
+
     async def test_private_review_returns_metadata_only(self):
         evidence = {
             "name": "owner/repo", "private": True, "branch": "main",
