@@ -148,6 +148,7 @@ class UsageStorageTests(unittest.TestCase):
             with open(path, encoding="utf-8") as handle:
                 manifest = json.load(handle)
             manifest["files"][0]["status"] = "backed_up"
+            manifest["files"][0]["validation"] = "valid"
             manifest["files"][0]["backup"] = "../secret.json"
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(manifest, handle)
@@ -187,7 +188,7 @@ class UsageStorageTests(unittest.TestCase):
             entry["record_count"] = 2
             with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as handle:
                 json.dump(manifest, handle)
-            with self.assertRaisesRegex(ValueError, "record count mismatch"):
+            with self.assertRaisesRegex(ValueError, "validation/count mismatch"):
                 storage_admin.verify_backup(backup_dir)
 
     def test_all_missing_sources_are_not_a_verified_backup(self):
