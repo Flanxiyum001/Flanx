@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -49,10 +50,29 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    tmp = f"{PREFS_FILE}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-    os.replace(tmp, PREFS_FILE)  # atomic
+    temporary = None
+    try:
+        parent = os.path.dirname(os.path.abspath(PREFS_FILE))
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=parent, prefix=".flanx-prefs-", delete=False
+        ) as handle:
+            temporary = handle.name
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, PREFS_FILE)
+        temporary = None
+    except (OSError, UnicodeError) as exc:
+        raise PreferenceStorageError("Could not save preference storage.") from exc
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # Preserve the original error; a stale temp file can be inspected separately.
+                pass
 
 
 def _user(data: dict, user_id: int) -> dict:
