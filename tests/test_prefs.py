@@ -70,5 +70,16 @@ class PreferenceStorageTests(unittest.TestCase):
         self.assertEqual(prefs.list_notes(42), ["remember this"])
 
 
+    def test_interrupted_replace_preserves_original_and_cleans_temp(self):
+        prefs.set_pref(42, "timezone", "UTC")
+        original = self.read_bytes()
+        with patch.object(prefs.os, "replace", side_effect=PermissionError("blocked")):
+            with self.assertRaises(prefs.PreferenceStorageError):
+                prefs.set_pref(42, "timezone", "Asia/Kolkata")
+        self.assertEqual(self.read_bytes(), original)
+        self.assertFalse(any(name.startswith(".flanx-prefs-")
+                             for name in os.listdir(self.temp.name)))
+
+
 if __name__ == "__main__":
     unittest.main()
