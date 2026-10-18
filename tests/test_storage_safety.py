@@ -133,6 +133,9 @@ class UsageStorageTests(unittest.TestCase):
             "preferences": os.path.join(self.temp.name, "missing-prefs.json"),
             "usage": os.path.join(self.temp.name, "missing-usage.json"),
         }):
+            prefs_path = storage_admin.FILES["preferences"]
+            with open(prefs_path, "w", encoding="utf-8") as handle:
+                json.dump({"users": {}}, handle)
             destination = os.path.join(self.temp.name, "backup")
             storage_admin.backup(destination)
             path = os.path.join(destination, "manifest.json")
@@ -159,6 +162,17 @@ class UsageStorageTests(unittest.TestCase):
             self.assertIsNone(main._record_usage_safely(failed_record, "test"))
         self.assertIn("Usage counters unavailable", output.getvalue())
         self.assertNotIn("private diagnostic", output.getvalue())
+
+
+    def test_all_missing_sources_are_not_a_verified_backup(self):
+        with patch.dict(storage_admin.FILES, {
+            name: os.path.join(self.temp.name, name + ".missing")
+            for name in storage_admin.FILES
+        }):
+            destination = os.path.join(self.temp.name, "empty-backup")
+            with self.assertRaisesRegex(ValueError, "no source data"):
+                storage_admin.backup(destination)
+            self.assertTrue(os.path.isdir(destination))
 
 
 if __name__ == "__main__":
