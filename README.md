@@ -1,6 +1,6 @@
-# Flanx
+# Max
 
-A self-correcting Discord coding agent. It pulls a file from GitHub, recalls past
+Max is your self-correcting Discord coding companion. It pulls a file from GitHub, recalls past
 lessons, searches the live web, proves the fix inside a **free** OnlineCompiler.io
 sandbox, learns from the result, and opens a pull request — all from a Discord command.
 
@@ -11,10 +11,10 @@ sandbox, learns from the result, and opens a pull request — all from a Discord
 ## Pipeline
 
 1. Pull the target file from GitHub (default branch).
-2. Read `brain_memory.txt` from that repo — Flanx's diary of past successes and failures.
+2. Read `brain_memory.txt` from that repo — Max's diary of past successes and failures.
 3. Search the live web for current docs / known fixes (`ddgs`).
 4. Baseline-run the current file in the free sandbox to capture a real error trace.
-   (Steps 2–4 are independent, so Flanx runs them **concurrently** — the slowest one
+   (Steps 2–4 are independent, so Max runs them **concurrently** — the slowest one
    sets the pace instead of the sum of all three.)
 5. Ask the LLM for a complete replacement file (raw code, no markdown fences).
 6. Re-run the patched file in the sandbox. On a failure the **retry ladder** kicks in:
@@ -74,7 +74,7 @@ Repository discovery is read-only. The token can only list repositories permitte
 - `!flanx_fix <owner/repo> <path/to/file.py> <what to change>` — full repair cycle
 - `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
   fresh branch for an external agent session to execute
-- `!flanx_brain <owner/repo>` — print what Flanx remembers for that repository
+- `!flanx_brain <owner/repo>` — print what Max remembers for that repository
 - `!flanx_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
 The legacy `!flanx_*` commands remain available; for plain chat use `max …` or mention `@Max` — see **Chat mode** below.
@@ -99,9 +99,9 @@ message with the word `max` (case-insensitive; `hi max`, `hey max`, `hello max`,
 
 Parsing pulls out the `owner/repo` and the file path automatically; set
 `FLANX_DEFAULT_REPO=owner/repo` and you can omit the repo. **Casual chat never gets the
-help card** — if a request is a fix but lacks details, Flanx asks for just that one
+help card** — if a request is a fix but lacks details, Max asks for just that one
 thing, in one friendly line. `!`-prefix commands keep working, and plain messages that
-don't address Flanx are ignored.
+don't address Max are ignored.
 
 ### Companion behaviour
 
@@ -114,7 +114,7 @@ user so the file stays small.
 
 ## Adding your own integrations
 
-Flanx has a **drop-in plugin system** — new capabilities need no changes to `main.py`:
+Max has a **drop-in plugin system** — new capabilities need no changes to `main.py`:
 
 1. Copy `integrations/_template.py` to `integrations/<name>.py` (any name **without** a
    leading underscore; underscore-prefixed files are ignored so the template stays
@@ -141,10 +141,10 @@ modules, proving the contract.
 
 ## Cloud staging with `!update_repo`
 
-Instead of running heavy work on the Railway box, Flanx can **stage** it:
+Instead of running heavy work on the Railway box, Max can **stage** it:
 
 1. `!update_repo username/my-app src/auth.js "Upgrade encryption to argon2id"`
-2. Flanx branches off the default branch (`flanx-evolution-<id>`), writes
+2. Max branches off the default branch (`flanx-evolution-<id>`), writes
    `tasks/update-job-<id>.md` containing your objective plus a definition-of-done
    checklist, commits it to that branch, and replies with a Discord embed linking the
    **branch** and the **manifest file** on GitHub.
@@ -355,7 +355,7 @@ free OpenAI-compatible endpoint instead, for example:
 ## English-only output
 
 FreeLLM routes to Chinese models (Qwen/DeepSeek) that occasionally answer in Chinese.
-Flanx is English 24/7 through two layers:
+Max is English 24/7 through two layers:
 
 1. **Prompt rule** — the system prompt demands English and forbids new non-English
    comments/docstrings, while existing file comments stay byte-for-byte untouched.
@@ -381,14 +381,14 @@ itself and are always English.
 - The file lives on the host, so on Railway a redeploy resets it unless you point
   `FLANX_USAGE_FILE` at a persistent volume.
 
-**Retry ladder:** when a generated patch fails sandbox validation, Flanx regenerates
+**Retry ladder:** when a generated patch fails sandbox validation, Max regenerates
 at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the exact failure log
 injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts. Only the final
 failure is written to the brain, so the memory log stays signal, not noise.
 
 ## The brain
 
-`brain_memory.txt` in the target repository is Flanx's long-term memory. Every run
+`brain_memory.txt` in the target repository is Max's long-term memory. Every run
 appends a timestamped line (failures and successes), it is trimmed to ~12KB so it always
 fits in one prompt, and it is committed straight to the default branch so you can watch
 the bot learn in the GitHub history.
