@@ -29,7 +29,7 @@ async def handle(event, payload: dict) -> str:
             lesson = add_verified_lesson(payload["repository"], payload["failure"], payload["root_cause"], payload["prevention"], payload["evidence"])
         except (ValueError, LessonStorageError) as exc:
             return f"Couldn't save that lesson: {exc}."
-        return f"Saved verified lesson for `{lesson['repository']}`.\n**Prevention:** {lesson['prevention']}\n**Evidence:** {lesson['evidence']}"
+        return f"Saved verified lesson for `{lesson['repository']}`.\n**Prevention:** {lesson['prevention']}\n**Evidence:** {lesson['evidence']}"[:2000]
     try:
         lessons = list_verified_lessons(payload["repository"])
     except LessonStorageError as exc:
