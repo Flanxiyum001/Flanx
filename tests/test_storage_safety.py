@@ -108,7 +108,7 @@ class UsageStorageTests(unittest.TestCase):
                     with open(path, "rb") as handle:
                         before[path] = handle.read()
                 destination = os.path.join(self.temp.name, "backup")
-                manifest = storage_admin.backup(destination)
+                manifest = storage_admin.backup(destination, allow_missing=list(storage_admin.STATE_PATHS))
                 self.assertEqual(len([f for f in manifest["files"] if f["status"] == "backed_up"]), 4)
                 self.assertEqual(manifest["files"][0]["lesson_count"], 1)
                 for path, content in before.items():
@@ -209,7 +209,7 @@ class UsageStorageTests(unittest.TestCase):
             "usage": os.path.join(self.temp.name, "missing-usage.json"),
         }):
             backup_dir = os.path.join(self.temp.name, "backup")
-            manifest = storage_admin.backup(backup_dir)
+            manifest = storage_admin.backup(backup_dir, allow_missing=list(storage_admin.STATE_PATHS))
             entry = next(row for row in manifest["files"] if row["name"] == "preferences")
             self.assertEqual(entry["record_count"], 1)
             entry["record_count"] = 2
@@ -361,7 +361,7 @@ class UsageStorageTests(unittest.TestCase):
             target = os.path.join(self.temp.name, "partial")
             with patch.object(storage_admin.shutil, "copy2", side_effect=OSError("interrupted")):
                 with self.assertRaisesRegex(OSError, "interrupted"):
-                    storage_admin.backup(target)
+                    storage_admin.backup(target, allow_missing=list(storage_admin.STATE_PATHS))
             self.assertTrue(os.path.isdir(target))
             with open(os.path.join(target, "manifest.json"), encoding="utf-8") as handle:
                 self.assertFalse(json.load(handle)["complete"])
@@ -447,6 +447,56 @@ class UsageStorageTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=20,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_backup_requires_explicit_classification_for_missing_stores(self):
+        prefs = os.path.join(self.temp.name, "prefs.json")
+        with open(prefs, "w", encoding="utf-8") as handle:
+            json.dump({"users": {}}, handle)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "absent.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "absent.json"),
+            "preferences": prefs,
+            "usage": os.path.join(self.temp.name, "absent-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "requires-policy")
+            with self.assertRaisesRegex(ValueError, "explicit --allow-missing"):
+                storage_admin.backup(destination)
+            self.assertFalse(os.path.exists(destination))
+
+    def test_allowed_missing_policy_is_recorded_and_verified(self):
+        prefs = os.path.join(self.temp.name, "prefs.json")
+        with open(prefs, "w", encoding="utf-8") as handle:
+            json.dump({"users": {}}, handle)
+        with patch.dict(storage_admin.FILES, {
+            "lessons_db": os.path.join(self.temp.name, "absent.sqlite3"),
+            "legacy_lessons_json": os.path.join(self.temp.name, "absent.json"),
+            "preferences": prefs,
+            "usage": os.path.join(self.temp.name, "absent-usage.json"),
+        }):
+            destination = os.path.join(self.temp.name, "policy-backup")
+            manifest = storage_admin.backup(
+                destination,
+                allow_missing=["lessons_db", "legacy_lessons_json", "usage"],
+            )
+            self.assertEqual(
+                manifest["allowed_missing_stores"],
+                ["legacy_lessons_json", "lessons_db", "usage"],
+            )
+            self.assertEqual(storage_admin.verify_backup(destination)["files_verified"], 1)
+            manifest["allowed_missing_stores"] = []
+            with open(os.path.join(destination, "manifest.json"), "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaisesRegex(ValueError, "lacks explicit allow-missing"):
+                storage_admin.verify_backup(destination)
+
+    def test_expected_existing_cannot_also_be_allowed_missing(self):
+        with self.assertRaisesRegex(ValueError, "both expected-existing and allowed-missing"):
+            storage_admin.backup(
+                os.path.join(self.temp.name, "conflicting-policy"),
+                expected_existing=["lessons_db"],
+                allow_missing=["lessons_db"],
+            )
 
 
 if __name__ == "__main__":
