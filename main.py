@@ -31,6 +31,7 @@ from openai import AsyncOpenAI
 from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
 from usage import format_usage, record_llm_usage, record_sandbox_run
 from model_router import route_model
+from prefs import get_pref
 
 import integrations  # pluggable modules: drop a file into integrations/ to add one
 
@@ -484,7 +485,7 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    intent, payload = chat_intent(remainder, FLANX_DEFAULT_REPO)
+    intent, payload = chat_intent(remainder, get_pref(message.author.id, "repo", FLANX_DEFAULT_REPO))
     channel = message.channel
     try:
         if intent == "search":
