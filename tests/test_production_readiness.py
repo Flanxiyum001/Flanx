@@ -254,6 +254,18 @@ class GitHubAccessControlTests(unittest.TestCase):
         remote.update_file.assert_not_called()
         remote.create_file.assert_not_called()
 
+    def test_public_github_brain_redacts_credential_assignments(self):
+        client = MagicMock()
+        remote = client.get_repo.return_value
+        remote.private = False
+        remote.get_contents.return_value.decoded_content = (
+            b'API_KEY = "synthetic-secret-value-123456"'
+        )
+        with patch.object(free_sandbox, "_client", return_value=client):
+            result = free_sandbox.read_flanx_brain("owner/repo")
+        self.assertIn("[REDACTED]", result)
+        self.assertNotIn("synthetic-secret-value", result)
+
     def test_private_github_brain_does_not_read_source(self):
         client = MagicMock()
         repository = client.get_repo.return_value
