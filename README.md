@@ -38,6 +38,10 @@ gateway never stalls.
   It reports **only inspected evidence**; no target files are modified.
 - \`max analyze this repository's architecture: owner/repo\` uses the same
   read-only inspection path.
+- All GitHub-backed commands (including read-only repository review) require the
+  operator Discord ID to appear in `MAX_GITHUB_ALLOWED_USER_IDS`. Do not enable
+  these commands for all members of a server. Restrict repository token permissions
+  to the minimum repositories and actions needed.
 - Private repositories are not automatically passed to an AI model for review.
   The bot can confirm metadata access, but full private-code review is blocked
   pending an explicitly approved secure process.
@@ -199,6 +203,7 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `DISCORD_TOKEN` | yes | Bot token |
 | `AI_API_KEY` | yes | Key for the OpenAI-compatible endpoint |
 | `GITHUB_TOKEN` | yes | Fine-grained PAT with contents + pull-requests write on the target repo |
+| `MAX_GITHUB_ALLOWED_USER_IDS` | **yes for GitHub actions** | Comma-separated trusted Discord user IDs; absent list **blocks** repository review, listings, and PR/staging operations |
 | `ONLINE_COMPILER_API_KEY` | yes | Free key from the OnlineCompiler.io dashboard (API Keys page) |
 | `AI_BASE_URL` | **yes** | Your verified, self-hosted FreeLLMAPI OpenAI-compatible URL ending in `/v1`; no public-host fallback |
 | `AI_MODEL` | no | default `auto` (only when supported by the configured gateway); select verified model via `GET /v1/models` |
