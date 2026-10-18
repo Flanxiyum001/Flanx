@@ -33,6 +33,7 @@ from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
 from usage import UsageStorageError, format_usage, record_llm_usage, record_sandbox_run
 from model_router import route_model
 from prefs import get_pref
+from authz import GITHUB_ACCESS_DENIED, github_user_allowed
 from provider_errors import configured_model_issue, safe_provider_error
 from repo_review import (
     REPO_URL_RE, extract_repository, inspect_repository,
@@ -561,6 +562,13 @@ async def on_message(message):
     try:
         selected_repo = get_pref(message.author.id, "repo", FLANX_DEFAULT_REPO)
         intent, payload = chat_intent(remainder, selected_repo)
+        uses_github = intent in {"fix", "review", "brain"} or (
+            intent == "integration" and payload["name"] == "repos"
+        )
+        if uses_github and not github_user_allowed(message.author.id):
+            await channel.send(GITHUB_ACCESS_DENIED)
+            await bot.process_commands(message)
+            return
         if intent == "search":
             query = payload["query"]
             if not query:
@@ -964,14 +972,20 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
 
 @bot.command(name="flanx_fix")
 async def flanx_fix(ctx, repo_name: str, file_path: str, *, diagnostic_goal: str):
-    """Pull a file from GitHub, patch it with AI, prove it in the free sandbox, open a PR."""
+    """Pull a file from GitHub, patch it with AI, smoke test, open a PR."""
+    if not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
+        return
     async with ctx.typing():
         await fix_pipeline(ctx, repo_name, file_path, diagnostic_goal)
 
 
 @bot.command(name="update_repo")
 async def update_repo(ctx, repo_name: str, file_path: str, *, instruction: str):
-    """Stage a task manifest on a fresh branch for Freebuff/Codebuff agents to execute."""
+    """Stage a task manifest on a fresh branch for review."""
+    if not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
+        return
     async with ctx.typing():
         try:
             repo_name = normalize_repository(repo_name)
@@ -1049,7 +1063,10 @@ async def update_repo(ctx, repo_name: str, file_path: str, *, instruction: str):
 
 @bot.command(name="flanx_brain")
 async def flanx_brain(ctx, repo_name: str):
-    """Show what Flanx remembers from past runs in a repository."""
+    """Show GitHub-hosted repository memory only to authorized operators."""
+    if not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
+        return
     memory = await asyncio.to_thread(read_flanx_brain, repo_name)
     await ctx.send(f"🧠 **Brain memory for `{repo_name}`**\n```\n{clip(memory, 1800)}\n```")
 
