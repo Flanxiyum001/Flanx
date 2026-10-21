@@ -1,11 +1,11 @@
-"""Persistent usage counters for Flanx: LLM tokens, estimated cost, sandbox quota.
+"""Persistent usage counters for Max: LLM tokens, estimated cost, sandbox quota.
 
 State lives in a small JSON file (default ``flanx_usage.json``) so counters survive
 bot restarts. On ephemeral hosts the file resets on redeploy unless you point
 ``FLANX_USAGE_FILE`` at a persistent path (e.g. a Railway volume).
 
 Cost is computed from USD-per-1M-token prices read from the environment. Both default
-to ``0`` because Flanx runs on a free token pool — set them if you ever move to a paid
+to ``0`` because Max runs on a free token pool — set them if you ever move to a paid
 endpoint so the counter reports real spend.
 """
 
@@ -126,7 +126,7 @@ def format_usage() -> str:
 
     month_label = datetime.now(timezone.utc).strftime("%b %Y")
     lines = [
-        "📊 **Flanx usage**",
+        "📊 **Max usage**",
         (
             f"**LLM:** {llm['calls']:,} calls · {llm['total_tokens']:,} tokens "
             f"({llm['prompt_tokens']:,} in / {llm['completion_tokens']:,} out) · "

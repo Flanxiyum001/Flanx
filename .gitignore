@@ -4,3 +4,7 @@ flanx_usage.json
 flanx_usage.json.tmp
 flanx_prefs.json
 flanx_prefs.json.tmp
+max_lessons.json
+max_lessons.sqlite3
+max_lessons.sqlite3-*
+.max_state/

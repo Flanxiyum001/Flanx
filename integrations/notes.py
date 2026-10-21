@@ -8,7 +8,7 @@ from prefs import add_note, list_notes
 
 NAME = "notes"
 DESCRIPTION = "personal notes, remembered per Discord user"
-USAGE = ["flanx remember the beta ships friday", "flanx show notes"]
+USAGE = ["max remember the beta ships friday", "max show notes"]
 
 NOTE_RE = re.compile(r"^\s*(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
 NOTES_LIST_RE = re.compile(
@@ -33,12 +33,12 @@ async def handle(event, payload: dict) -> str:
         clipped = payload["text"][:150]
         return (
             f"✍️ Noted ({count} note{plural} so far): “{clipped}”\n"
-            "Say `flanx show notes` whenever you want them back."
+            "Say `max show notes` whenever you want them back."
         )
 
     notes = list_notes(event.author_id)
     if not notes:
-        return "📒 No notes yet — say `flanx remember <anything>` and I'll keep it for you."
+        return "📒 No notes yet — say `max remember <anything>` and I'll keep it for you."
     items = "\n".join(
         f"{i}. {note[:120]}" for i, note in enumerate(notes[-15:], 1)
     )

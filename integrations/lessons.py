@@ -4,7 +4,7 @@ import re
 from learning import LessonStorageError, add_verified_lesson, list_verified_lessons
 NAME = "lessons"
 DESCRIPTION = "record and retrieve explicitly verified project lessons"
-USAGE = ["flanx lessons owner/repo", "flanx lesson owner/repo | failure | root cause | prevention | evidence"]
+USAGE = ["max lessons owner/repo", "max lesson owner/repo | failure | root cause | prevention | evidence"]
 ADD_RE = re.compile(r"^\s*lesson\s+(.+)$", re.IGNORECASE | re.DOTALL)
 LIST_RE = re.compile(r"^\s*lessons\s+([\w.-]+/[\w.-]+)\s*$", re.IGNORECASE)
 
@@ -35,7 +35,7 @@ def _reply_prefix(repository):
 
 async def handle(event, payload: dict) -> str:
     if payload["action"] == "invalid":
-        return "Use `flanx lesson owner/repo | failure | root cause | prevention | evidence`. Only record a lesson after verifying the root cause; never include secrets."
+        return "Use `max lesson owner/repo | failure | root cause | prevention | evidence`. Only record a lesson after verifying the root cause; never include secrets."
     if payload["action"] == "add":
         try:
             lesson = add_verified_lesson(payload["repository"], payload["failure"], payload["root_cause"],

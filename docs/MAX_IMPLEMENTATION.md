@@ -1,14 +1,14 @@
-# Project Max Implementation Plan
+# Max Implementation Plan
 
 ## Product goals
 
-Project Max is a friendly, personalized Discord-first assistant that improves from verified experience while keeping the existing Railway deployment and operating costs under control.
+Max is a friendly, personalized Discord-first assistant that improves from verified experience while keeping the existing Railway deployment and operating costs under control.
 
 ## Non-negotiable constraints
 
 - Keep `main` deployable and preserve the existing Railway production service during migration.
 - Do not change Railway variables or deploy automatically during development.
-- Reuse the existing OpenAI-compatible FreeLLMAPI gateway and unified API key.
+- Keep the existing FreeLLMAPI gateway optional and preserve its AI_BASE_URL, AI_API_KEY, and AI_MODEL compatibility.
 - Keep the existing bot process and avoid additional paid services by default.
 - Preserve existing commands and features until replacements are tested.
 - Bound model calls, retries, tool calls, execution time and context size.
@@ -20,7 +20,7 @@ Project Max is a friendly, personalized Discord-first assistant that improves fr
 Keep modules in the existing process initially; do not split them into separate Railway services without evidence that it is necessary.
 
 - Discord gateway and command router
-- Assistant orchestrator and friendly Max persona
+- Assistant orchestrator with one Max identity
 - Task-aware model router
 - Capability registry for GitHub, research and sandbox execution
 - Personal memory and scoped project/repository knowledge
@@ -28,19 +28,54 @@ Keep modules in the existing process initially; do not split them into separate 
 - Permission and approval policy
 - Usage metrics, structured logs and bounded execution
 
+Phase 3 adds bounded planner, coder, reviewer, and tester roles using temporary
+file copies and task-engine capability checks. The repair and task-staging
+commands prepare scoped pending actions through the task engine. They do not
+write to GitHub because a trusted Discord approval interface does not exist yet.
+Repository repair requires explicit opt-in before sending source or memory
+to remote sandbox services. Cloud model inference requires a separate privacy opt-in. Local file copies do not provide operating-
+system isolation for executable tests.
+
 ## Task-aware model routing
 
-Use the existing unified FreeLLMAPI key and configured `AI_BASE_URL`. Do not create per-provider secrets in Max.
+Phase 4 extends the existing model router with local Ollama inference. The
+initial text model is `qwen3:8b`; `qwen3-vl:8b` is reserved for explicit vision
+selection. The router owns provider selection, privacy checks, concurrency,
+timeouts, and response normalization. Local inference needs no cloud key.
+FreeLLMAPI remains available only when the cloud provider and policy are
+explicitly enabled. Private repository content, memory, and chat also require
+the separate cloud private-context opt-in. Provider failures do not cause
+silent cross-provider fallback.
 
-The task router should select a configured FreeLLMAPI model or routing profile based on task type:
-- Casual conversation: fast profile
-- General questions and planning: balanced profile
-- Coding and debugging: coding-focused profile
-- Review and validation analysis: reliable or strong reasoning profile
+See [Local inference and privacy](LOCAL_INFERENCE.md) for model IDs, environment
+variables, resource limits, and the Windows smoke test.
 
-Profile names are configuration, not assumptions. Verify them against the live gateway before enabling them. Keep a safe default model/profile and a manual override. If a profile is unavailable or rate-limited, use bounded fallback behavior; do not retry indefinitely.
+## Phase 5 execution and recovery
 
-Record the requested task category, selected profile/model, token usage when available, latency, provider failures and objective task outcome. Do not log API keys or unnecessary private prompt content.
+The tester uses a fixed compile command in a subprocess with a minimal
+environment, bounded output, a deadline, and direct-child termination on
+cancellation or timeout. Executable repository unit tests remain disabled
+without a stronger isolation backend; a temporary directory is not a
+filesystem security boundary.
+
+The bot's task orchestrators persist sanitized metadata in a shared local
+SQLite file. Recovery marks unfinished tasks interrupted, treats uncertain
+external actions as requiring reconciliation, and never restores an approval
+or automatically replays an external action. This does not change the
+existing disabled repository write handlers. See
+[Execution and recovery](EXECUTION_AND_RECOVERY.md) for exact limits and the
+opt-in Windows Ollama smoke test.
+
+## Phase 6 authenticated test publishing
+
+An opt-in Discord button flow binds a validated `!max_fix` proposal to the
+requesting Discord ID, a configured test repository, exact branches, file,
+payload digest, and expiry. The first enabled operation creates a branch and
+pull request only. Branch-only task staging, remote-memory writes, merges, and
+deployments remain disabled. Uncertain GitHub writes require read-only
+reconciliation and never replay automatically. See
+[Approval and publishing](APPROVAL_AND_PUBLISHING.md) for configuration and
+recovery details.
 
 ## Verified learning system
 
@@ -81,7 +116,7 @@ Invoke only roles relevant to the task. Apply a global task budget, per-role lim
 
 ## Persistence and Railway safety
 
-The current Flanx preferences and usage modules use local JSON files. The bot service has no attached Railway volume, so persistence across redeploys is not guaranteed. Audit available storage and backups before making long-term learning depend on local files. Prefer the least-cost durable option compatible with the actual deployment; do not add a paid database by default.
+The current Max preferences and usage modules use local JSON files. The bot service has no attached Railway volume, so persistence across redeploys is not guaranteed. Audit available storage and backups before making long-term learning depend on local files. Prefer the least-cost durable option compatible with the actual deployment; do not add a paid database by default.
 
 The FreeLLMAPI service has its own persistent volume and must remain separate from the bot's lifecycle. Do not modify its configuration as part of the initial Max migration.
 
@@ -98,7 +133,7 @@ The FreeLLMAPI service has its own persistent volume and must remain separate fr
 ## Acceptance criteria for the first implementation increment
 
 - Existing configuration continues to work.
-- The unified API key is reused; no key is hard-coded.
+- Cloud inference reuses the existing API key; local inference needs no key.
 - Task routing is configurable and testable without network access.
 - Unknown profiles and provider failures produce bounded, understandable errors.
 - No new paid service or background polling loop is introduced.

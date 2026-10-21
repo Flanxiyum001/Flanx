@@ -1,5 +1,6 @@
 """Offline tests for transactional verified lessons."""
 import asyncio
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -30,7 +31,7 @@ class LearningTests(unittest.TestCase):
 
     def test_persists_across_connections(self):
         self.add()
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM lessons").fetchone()[0], 1)
         self.assertEqual(len(learning.list_verified_lessons("owner/repo")), 1)
 
@@ -199,7 +200,7 @@ class LearningTests(unittest.TestCase):
         stored = learning.list_verified_lessons("owner/repo")
         self.assertCountEqual([row["failure"] for row in stored],
                               ["first-wave-0", "first-wave-1"])
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='lessons'"
@@ -307,7 +308,7 @@ class LearningTests(unittest.TestCase):
     def test_migration_rollback_on_sql_failure(self):
         original = self.add()
         import sqlite3
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection, connection:
             connection.execute("""CREATE TRIGGER reject_lesson BEFORE INSERT ON lessons
                                BEGIN SELECT RAISE(FAIL, 'test insert failure'); END""")
         self.write_json([{**original, "id": "new-id", "failure": "new failure"}])
@@ -317,7 +318,7 @@ class LearningTests(unittest.TestCase):
 
     def test_read_and_write_error_surfaces(self):
         self.add()
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection, connection:
             connection.execute("DROP TABLE lessons")
         with self.assertRaises(learning.LessonStorageError):
             learning.list_verified_lessons("owner/repo")

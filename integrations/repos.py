@@ -5,7 +5,7 @@ from github import Github, GithubException
 from prefs import get_pref, set_pref
 NAME = "repos"
 DESCRIPTION = "list accessible GitHub repos, choose a default, and inspect project instructions"
-USAGE = ["flanx repos", "flanx use owner/repo", "flanx current repo", "flanx inspect owner/repo"]
+USAGE = ["max repos", "max use owner/repo", "max current repo", "max inspect owner/repo"]
 LIST_RE = re.compile(r"^\s*repos(?:\s+(\d{1,3}))?\s*$", re.I)
 USE_RE = re.compile(r"^\s*use\s+([\w.-]+/[\w.-]+)\s*$", re.I)
 INSPECT_RE = re.compile(r"^\s*inspect\s+([\w.-]+/[\w.-]+)\s*$", re.I)
@@ -60,14 +60,14 @@ async def handle(event, payload: dict) -> str:
     action = payload["action"]
     if action == "current":
         selected = get_pref(event.author_id, "repo")
-        return f"Your selected repository is `{selected}`." if selected else "No repository selected yet. Use `flanx repos`, then `flanx use owner/repo`."
+        return f"Your selected repository is `{selected}`." if selected else "No repository selected yet. Use `max repos`, then `max use owner/repo`."
     if action == "use":
         try:
             repo = await asyncio.to_thread(_github().get_repo, payload["repository"])
         except Exception as exc:
             return f"Couldn't verify that repository with the configured GitHub token: {str(exc)[:220]}"
         set_pref(event.author_id, "repo", repo.full_name)
-        return f"Selected `{repo.full_name}` as your personal default repository. Say `flanx current repo` to check it, or `flanx inspect {repo.full_name}` to inspect it."
+        return f"Selected `{repo.full_name}` as your personal default repository. Say `max current repo` to check it, or `max inspect {repo.full_name}` to inspect it."
     if action == "inspect":
         try: return await asyncio.to_thread(_inspect, payload["repository"])
         except Exception as exc: return f"Repository inspection failed: {str(exc)[:300]}"
@@ -75,11 +75,11 @@ async def handle(event, payload: dict) -> str:
         rows, has_next = await asyncio.to_thread(_list_repos, payload["page"])
     except Exception as exc:
         return f"Couldn't list repositories: {str(exc)[:300]}"
-    if not rows: return f"No repositories found on page {payload['page']}. Try `flanx repos 1` or check GitHub token permissions."
+    if not rows: return f"No repositories found on page {payload['page']}. Try `max repos 1` or check GitHub token permissions."
     lines = [f"**Accessible GitHub repositories — page {payload['page']}**"]
     for row in rows:
         privacy = "private" if row["private"] else "public"
         description = f" — {row['description']}" if row["description"] else ""
         lines.append(f"• `{row['full_name']}` ({privacy}, updated {row['updated']}){description}")
-    lines.append(f"Use `flanx use owner/repo` to select one. " + (f"Next page: `flanx repos {payload['page'] + 1}`." if has_next else "End of results."))
+    lines.append(f"Use `max use owner/repo` to select one. " + (f"Next page: `max repos {payload['page'] + 1}`." if has_next else "End of results."))
     return "\n".join(lines)[:1850]

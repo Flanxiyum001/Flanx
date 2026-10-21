@@ -6,6 +6,9 @@ from model_router import configured_routes, route_model
 
 
 class ModelRouterTests(unittest.TestCase):
+    def test_new_default_model_id(self):
+        self.assertEqual(configured_routes({})["general"], "qwen3:8b")
+
     def test_explicit_override_wins(self):
         self.assertEqual(
             route_model("coding", override="manual-coder", fallback="legacy", environ={}),

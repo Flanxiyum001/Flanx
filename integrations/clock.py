@@ -8,7 +8,7 @@ from prefs import current_time, is_valid_timezone, set_pref
 
 NAME = "clock"
 DESCRIPTION = "per-user timezone and current time"
-USAGE = ["flanx set timezone Asia/Kolkata", "flanx what time is it", "flanx time in UTC"]
+USAGE = ["max set timezone Asia/Kolkata", "max what time is it", "max time in UTC"]
 
 TIMEZONE_SET_RE = re.compile(
     r"^\s*(?:please\s+)?set\s+(?:your\s+)?timezone\s+(?:to|as|:)?\s*([A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+)?)",
@@ -41,7 +41,7 @@ async def handle(event, payload: dict) -> str:
             )
         set_pref(event.author_id, "timezone", tz)
         return (
-            f"🗺️ Timezone saved — just ask `flanx what time is it` anytime and "
+            f"🗺️ Timezone saved — just ask `max what time is it` anytime and "
             f"I'll answer in `{tz}`."
         )
 
@@ -49,7 +49,7 @@ async def handle(event, payload: dict) -> str:
     if result is None:
         return (
             "⏰ I don't have a timezone for you yet — say "
-            "`flanx set timezone Asia/Kolkata` once and I'll remember it."
+            "`max set timezone Asia/Kolkata` once and I'll remember it."
         )
     now, tz = result
     return f"🕒 It's **{now}** in `{tz}`."

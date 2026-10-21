@@ -1,50 +1,80 @@
-# Flanx
+# Max
 
-A self-correcting Discord coding agent. It pulls a file from GitHub, recalls past
-lessons, searches the live web, proves the fix inside a **free** OnlineCompiler.io
-sandbox, learns from the result, and opens a pull request — all from a Discord command.
+A Discord coding assistant. Repository repair prepares and validates a patch.
+Publishing a branch and pull request requires an authenticated Discord approval
+and explicit configuration for one test repository. Publishing is off by default.
 
 ```
-!flanx_fix owner/repo src/app.py add retry logic around the HTTP call
+!max_fix owner/repo src/app.py add retry logic around the HTTP call
 ```
 
 ## Pipeline
 
 1. Pull the target file from GitHub (default branch).
-2. Read `brain_memory.txt` from that repo — Flanx's diary of past successes and failures.
+2. Read `brain_memory.txt` from that repo — Max's diary of past successes and failures.
 3. Search the live web for current docs / known fixes (`ddgs`).
 4. Baseline-run the current file in the free sandbox to capture a real error trace.
-   (Steps 2–4 are independent, so Flanx runs them **concurrently** — the slowest one
+   (Steps 2–4 are independent, so Max runs them **concurrently** — the slowest one
    sets the pace instead of the sum of all three.)
 5. Ask the LLM for a complete replacement file (raw code, no markdown fences).
 6. Re-run the patched file in the sandbox. On a failure the **retry ladder** kicks in:
    one more attempt at temperature 0 (on `AI_RETRY_MODEL` if set) with the failure log
-   attached. Only after all attempts fail is the lesson written to the brain and no
-   branch pushed.
-7. On success, write the lesson to the brain, push a branch and open a PR.
+   attached. A failed patch makes no repository write.
+7. On success, prepare a scoped approval request. A configured test repository
+   can receive the patch on a new branch and pull request after authenticated
+   approval. Memory updates remain disabled.
+
+Repository repair is paused by default before source reaches the remote sandbox.
+Set `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT=true` only after deciding that this
+repository's source, memory, and diagnostic context may enter that workflow.
 
 All blocking work (PyGithub, sandbox HTTP, web search) runs in threads so the Discord
 gateway never stalls.
 
-## Project Max model routing
+## Max model routing
 
-Max supports task-specific model/profile identifiers through the existing OpenAI-compatible
-FreeLLMAPI gateway. The current `AI_MODEL` setting remains the compatibility fallback.
-Configure task profiles only after verifying they exist in your FreeLLMAPI dashboard:
+Max defaults to local Ollama with `qwen3:8b`. Task and role models, the Ollama endpoint, request limits, and optional FreeLLMAPI routing are configurable. Cloud use for source, memory, and Discord chat requires an explicit privacy setting. See [Local inference and privacy](docs/LOCAL_INFERENCE.md) for settings and a Windows smoke test.
 
-- `MAX_MODEL_CHAT` — casual conversation
-- `MAX_MODEL_GENERAL` — general questions and planning
-- `MAX_MODEL_RESEARCH` — research and synthesis
-- `MAX_MODEL_CODING` — code generation and debugging
-- `MAX_MODEL_REVIEW` — code review and verification
+## Task engine (Phase 2)
 
-Each value may be a model ID or a gateway routing profile accepted by your FreeLLMAPI
-instance (for example, a configured `auto:coding` profile). Unset values fall back to
-`AI_MODEL`; no new API keys are required. Set `AI_BASE_URL` to the self-hosted gateway
-URL and keep `AI_API_KEY` as a Railway secret. Do not put credentials in source control.
+Ordinary chat requests now pass through `task_engine.py`: a normalized task is
+created, checked against the capability allowlist, run with a deadline, and
+returned as a structured outcome. The registered `general_chat` handler calls
+the existing `generate_assistant_reply()` function, so `model_router.py` and
+its configuration precedence remain in use. Task metadata is stored in SQLite
+without raw prompts, source, results, or credentials. Interrupted tasks require
+reconciliation after restart and are never automatically replayed. General chat
+uses one attempt and a 120-second deadline. See
+[Execution and recovery](docs/EXECUTION_AND_RECOVERY.md).
 
-The routing module is network-independent and can be tested with:
-`python -m unittest discover -s tests -v`.
+`task_engine.py` defines the task state transitions and a central capability
+allowlist. Read operations and sandbox execution are distinct from writes,
+deployments, purchases, bookings, external messages, and deletion. A registered
+handler for a consequential action cannot run until a trusted caller supplies
+an explicit approval matching the task, capability, target, and payload.
+The test-repository approval flow uses Discord buttons and the same task
+boundary. See [Approval and publishing](docs/APPROVAL_AND_PUBLISHING.md).
+
+## Specialist workflow (Phase 3)
+
+`specialists.py` registers planner, coder, reviewer, and tester roles through the
+task engine. The planner returns at most eight flat steps. The coder proposes
+changes to at most eight selected text files, which are applied only to a
+temporary copy. The reviewer inspects the actual unified diff and reports
+structured findings. The tester runs the named `compile` check in that copy
+with time and output limits. Executable `unittest` checks are skipped until a
+stronger isolation backend exists. At most two correction cycles are
+allowed. Planner and coder adapters must be supplied by a trusted caller;
+there is no automatic model call or Discord trigger for this workflow.
+
+The temporary copy is file isolation, not an operating-system sandbox. Tests
+are executable code and must come from a trusted repository. The workflow
+returns a bounded diff and report without applying it to the primary tree.
+
+`!max_fix` can present a Discord approval for one configured test repository.
+`!update_repo` still creates a pending, scoped action without a publishing path.
+Approval requests expire after five minutes and are not durable across restarts.
+The old production write handlers remain disabled.
 
 ## Files
 
@@ -52,7 +82,11 @@ The routing module is network-independent and can be tested with:
 | --- | --- |
 | `main.py` | Discord bot: commands, prompts, PR flow |
 | `free_sandbox.py` | OnlineCompiler.io execution + `brain_memory.txt` read/write |
-| `requirements.txt` | `discord.py`, `openai`, `PyGithub`, `requests`, `ddgs` |
+| `task_engine.py` | In-process task state, capability checks, deadlines, retries and approvals |
+| `task_store.py` | SQLite task metadata and restart recovery |
+| `approval_publish.py` | Test-repository approval binding, publishing, and reconciliation |
+| `specialists.py` | Scoped planner, coder, reviewer, tester workflow and temporary workspace |
+| `requirements.txt` | `discord.py`, `aiohttp`, `openai`, `PyGithub`, `requests`, `ddgs` |
 | `knowledge.md` | Repo-level directive that steers Freebuff/Codebuff agents handling `tasks/*.md` |
 | `usage.py` | Persistent LLM token/cost counters and monthly sandbox-quota tracking |
 | `prefs.py` | Per-user companion preferences: timezone + personal notes (JSON) |
@@ -60,52 +94,56 @@ The routing module is network-independent and can be tested with:
 
 ## GitHub repository workflows
 
-Use the chat trigger (mention Max or prefix a message with `flanx`) for these actions:
+Mention the bot account or prefix a message with `max` for these actions:
 
-- `flanx repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `flanx repos 2` opens the next page.
-- `flanx use owner/repo` — verify access and save a per-user default repository.
-- `flanx current repo` — show your saved repository.
-- `flanx inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
+- `max repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `max repos 2` opens the next page.
+- `max use owner/repo` — verify access and save a per-user default repository.
+- `max current repo` — show your saved repository.
+- `max inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
 
 Repository discovery is read-only. The token can only list repositories permitted by its GitHub scopes and organization policies. Per-user settings are stored in the existing local JSON preferences file and may not survive redeploys without persistent storage.
 
 ## Commands
 
-- `!flanx_fix <owner/repo> <path/to/file.py> <what to change>` — full repair cycle
-- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
-  fresh branch for an external agent session to execute
-- `!flanx_brain <owner/repo>` — print what Flanx remembers for that repository
-- `!flanx_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
+- `!max_fix <owner/repo> <path/to/file.py> <what to change>` — validate a patch and request approval for a configured test repository (requires repository privacy opt-in)
+- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — prepare a pending task manifest action
+- `!max_publish_status <task-id>` — authorized, read-only reconciliation of a test publishing operation
+- `!max_brain <owner/repo>` — print what Max remembers for that repository
+- `!max_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
-All of these also work as plain chat (`flanx …` / `@Flanx …`) — see **Chat mode** below.
+All of these also work as plain chat (`max …` or a bot mention) — see **Chat mode** below.
+
+For existing users, the `mex` and `flanx` chat triggers and their matching
+`!mex_*` and `!flanx_*` command spellings remain accepted. They are compatibility
+inputs; the bot identifies itself as Max in replies and new task output.
 
 ## Chat mode (no prefix needed)
 
-Talk to Flanx in plain chat — it answers when you **mention it** (`@Flanx …`) or start a
-message with the word `flanx` (case-insensitive, `hey flanx`/`flanx,` also work):
+Talk to Max in plain chat — it answers when you **mention the bot account** or start a
+message with `max` (case-insensitive; `hey max` and `max,` also work):
 
-| You type | Flanx does |
+| You type | Max does |
 | --- | --- |
-| `flanx help me with src/app.js in owner/repo — add retry logic` | runs the full `!flanx_fix` repair pipeline |
-| `@Flanx fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
-| `flanx search python 3.14 changes for me` | live web search, results posted back |
-| `flanx what do you remember about owner/repo` | prints that repo's brain memory |
-| `flanx stats` / `flanx how many tokens have you used` | usage: tokens, cost, sandbox quota |
-| `flanx yo sup` / `flanx how are you` / `flanx who are you` | friendly companion replies (no fix-request nagging) |
-| `flanx set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
-| `flanx what time is it` | current time in your saved timezone (or `flanx time in America/New_York`) |
-| `flanx remember <anything>` / `flanx show notes` | personal notes, stored per user |
-| `flanx help` | usage card |
+| `max help me with src/app.js in owner/repo — add retry logic` | runs the full `!max_fix` repair pipeline |
+| Mention the bot, then say `fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
+| `max search python 3.14 changes for me` | live web search, results posted back |
+| `max what do you remember about owner/repo` | prints that repo's brain memory |
+| `max stats` / `max how many tokens have you used` | usage: tokens, cost, sandbox quota |
+| `max yo sup` / `max how are you` / `max who are you` | friendly companion replies (no fix-request nagging) |
+| `max set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
+| `max what time is it` | current time in your saved timezone (or `max time in America/New_York`) |
+| `max remember <anything>` / `max show notes` | personal notes, stored per user |
+| `max help` | usage card |
 
 Parsing pulls out the `owner/repo` and the file path automatically; set
 `FLANX_DEFAULT_REPO=owner/repo` and you can omit the repo. **Casual chat never gets the
-help card** — if a request is a fix but lacks details, Flanx asks for just that one
+help card** — if a request is a fix but lacks details, Max asks for just that one
 thing, in one friendly line. `!`-prefix commands keep working, and plain messages that
-don't address Flanx are ignored.
+don't address Max are ignored.
 
 ### Companion behaviour
 
-Flanx recognises greetings (`yo sup`, `good morning`), `how are you`, `who are you`,
+Max recognises greetings (`yo sup`, `good morning`), `how are you`, `who are you`,
 `thanks`, time/timezone requests and personal notes — all answered conversationally
 instead of being treated as broken GitHub commands. Timezones and notes are stored per
 Discord user in `flanx_prefs.json` (git-ignored; point `FLANX_PREFS_FILE` at a
@@ -114,7 +152,7 @@ user so the file stays small.
 
 ## Adding your own integrations
 
-Flanx has a **drop-in plugin system** — new capabilities need no changes to `main.py`:
+Max has a **drop-in plugin system** — new capabilities need no changes to `main.py`:
 
 1. Copy `integrations/_template.py` to `integrations/<name>.py` (any name **without** a
    leading underscore; underscore-prefixed files are ignored so the template stays
@@ -122,12 +160,12 @@ dormant).
 2. Fill in the contract:
    ```python
    NAME = "weather"                    # slug used by the router
-   DESCRIPTION = "current weather"     # shown by `flanx integrations`
-   USAGE = ["flanx weather in Pune"]   # example phrase
+   DESCRIPTION = "current weather"     # shown by `max integrations`
+   USAGE = ["max weather in Pune"]   # example phrase
    def match(text: str) -> dict | None  # claim a message -> payload, else None
    async def handle(event, payload) -> str  # do the work, return the reply
    ```
-3. Restart the bot. `flanx integrations` now lists it, and any chat message its
+3. Restart the bot. `max integrations` now lists it, and any chat message its
    `match()` claims is routed to `handle()` — search/stats/fix intents keep priority
    over your claims only where they are checked first, so keep `match()` anchored and
    specific.
@@ -141,25 +179,13 @@ modules, proving the contract.
 
 ## Cloud staging with `!update_repo`
 
-Instead of running heavy work on the Railway box, Flanx can **stage** it:
+`!update_repo` prepares a manifest proposal:
 
 1. `!update_repo username/my-app src/auth.js "Upgrade encryption to argon2id"`
-2. Flanx branches off the default branch (`flanx-evolution-<id>`), writes
-   `tasks/update-job-<id>.md` containing your objective plus a definition-of-done
-   checklist, commits it to that branch, and replies with a Discord embed linking the
-   **branch** and the **manifest file** on GitHub.
-3. An agent session (Freebuff Cloud with the repo connected, or Codebuff) reads the
-   manifest together with `knowledge.md`, applies the change, validates it, and opens the
-   PR per the checklist.
-
-The bot also works in the other direction: `!flanx_fix` does the patching itself using
-the free OnlineCompiler.io sandbox, so nothing depends on an external trigger.
-
-> **Honest scope note:** what is verified is the Git staging (branch + manifest + GitHub
-> links), the `knowledge.md` convention (documented for Codebuff, which Freebuff is built
-> on), and Freebuff's "Connect a repository" entry point. What is **not** publicly
-> documented is an automatic push→agent→PR webhook, so the embed deliberately does not
-> promise one — it tells you where the task is staged and how to run it.
+2. Max reads the target repository and builds `tasks/update-job-<id>.md` with
+   the objective and a definition-of-done checklist.
+3. The task engine returns a pending approval request bound to the repository,
+   branch, manifest path, and exact payload. No branch or manifest is created.
 
 ## Environment variables
 
@@ -168,25 +194,34 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | Key | Required | Notes |
 | --- | --- | --- |
 | `DISCORD_TOKEN` | yes | Bot token |
-| `AI_API_KEY` | yes | Key for the OpenAI-compatible endpoint |
+| `AI_API_KEY` | cloud only | Key for the optional OpenAI-compatible endpoint |
 | `GITHUB_TOKEN` | yes | Fine-grained PAT with contents + pull-requests write on the target repo |
 | `ONLINE_COMPILER_API_KEY` | yes | Free key from the OnlineCompiler.io dashboard (API Keys page) |
 | `AI_BASE_URL` | no | default `https://freellmapi.co/v1` |
-| `AI_MODEL` | no | default `qwen-2.5-coder-32b` |
+| `AI_MODEL` | no | legacy model ID override; local default is `qwen3:8b` |
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
 | `FLANX_DEFAULT_REPO` | no | default `owner/repo` used by chat mode when a message omits it |
 | `FLANX_FIX_ATTEMPTS` | no | retry-ladder depth, `1`–`3` (default `2` = first try + one retry) |
 | `AI_RETRY_MODEL` | no | second model used for retries; unset = same model at temperature 0 |
+| `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT` | no | default false; explicit opt-in for the remote repository repair workflow |
+| `MAX_INFERENCE_PROVIDER` | no | `local` (default) or `cloud` |
+| `MAX_INFERENCE_POLICY` | no | `local_only` (default) or `cloud_allowed` |
+| `MAX_ALLOW_CLOUD_PRIVATE_CONTEXT` | no | default false; additional opt-in for cloud inference with chat, source, or memory |
+| `MAX_TASK_DB` | no | local SQLite task metadata path (default `.max_state/tasks.sqlite3`) |
+| `MAX_CHECK_TIMEOUT_SECONDS` | no | local compile-check deadline (default 10 seconds, maximum 30) |
+| `MAX_CHECK_OUTPUT_BYTES` | no | captured check output (default 4000, maximum 16000) |
 | `AI_INPUT_PRICE_PER_M` | no | USD per 1M prompt tokens for the cost counter (default `0` = free pool) |
 | `AI_OUTPUT_PRICE_PER_M` | no | USD per 1M completion tokens (default `0` = free pool) |
 | `FLANX_USAGE_FILE` | no | counter file path (default `flanx_usage.json`) |
 | `FLANX_PREFS_FILE` | no | companion preferences path (default `flanx_prefs.json`) |
 
+The `FLANX_*` and `MAX_*` keys and existing storage filenames remain unchanged so
+current installations can use their settings and data without migration.
 
 ## Verified lessons: SQLite storage, safe migration, and rollback
 
-The `flanx lesson` and `flanx lessons` interfaces use SQLite only.
+The `max lesson` and `max lessons` interfaces use SQLite only.
 `MAX_LESSONS_DB` defaults to `max_lessons.sqlite3`. They **never
 automatically fall back** to `MAX_LESSONS_FILE` (`max_lessons.json`), and
 startup does not migrate or delete legacy JSON. A missing database is new
@@ -289,55 +324,44 @@ Docs: <https://onlinecompiler.io/docs> · Pricing: <https://onlinecompiler.io/pr
 
 ### LLM endpoint
 
-`freellmapi.co` distributes a **self-hosted** OpenAI-compatible router (its documented
-base URL is `http://localhost:3001/v1`, and requests go out using *your own* provider
-keys). If you do not self-host it, point `AI_BASE_URL`/`AI_MODEL` at a provider with a
-free OpenAI-compatible endpoint instead, for example:
-
-| Provider | `AI_BASE_URL` | Notes |
-| --- | --- | --- |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | documented free tier for Flash models |
-| Groq | `https://api.groq.com/openai/v1` | free tier with rate limits |
-| OpenRouter | `https://openrouter.ai/api/v1` | free router + `:free` models; `qwen/qwen-2.5-coder-32b-instruct` itself is paid |
-| Self-hosted FreeLLMAPI | `http://localhost:3001/v1` | router is free, inference uses your provider keys |
+Local Ollama is the default. See [Local inference and privacy](docs/LOCAL_INFERENCE.md) for local settings and explicit cloud routing.
 
 ## English-only output
 
-FreeLLM routes to Chinese models (Qwen/DeepSeek) that occasionally answer in Chinese.
-Flanx is English 24/7 through two layers:
+Some configured models may occasionally answer in Chinese.
+Max is English 24/7 through two layers:
 
 1. **Prompt rule** — the system prompt demands English and forbids new non-English
    comments/docstrings, while existing file comments stay byte-for-byte untouched.
 2. **Runtime guard** — `is_non_english()` scans every patch for CJK characters that are
    not already present in the source file; a hit triggers one bilingual "English only"
    re-ask before the patch is accepted. Anything that still slips through is caught by
-   the sandbox gate before any branch is pushed.
+   the sandbox gate before any repository action is prepared.
 
 Discord messages, PR titles/bodies and `brain_memory.txt` entries are written by the bot
 itself and are always English.
 
 ## Usage counters, cost and the retry ladder
 
-**Counters** (`!flanx_stats` or `flanx stats`) are maintained in `flanx_usage.json`
+**Counters** (`!max_stats` or `max stats`) are maintained in `flanx_usage.json`
 (git-ignored, written atomically, thread-safe):
 
 - **LLM:** call count, prompt/completion/total tokens, per-model breakdown, and
-  estimated USD cost. Cost is `$0` by design while you run on the free token pool —
-  set `AI_INPUT_PRICE_PER_M` / `AI_OUTPUT_PRICE_PER_M` if you move to a paid endpoint
-  (OpenRouter lists `qwen-2.5-coder-32b` at $0.66 / $1.00 per 1M tokens).
+  estimated USD cost. Set `AI_INPUT_PRICE_PER_M` and `AI_OUTPUT_PRICE_PER_M`
+  for an explicitly configured cloud provider; local inference records tokens
+  when Ollama reports them.
 - **Sandbox:** runs used this calendar month against the free plan's 100,000 quota,
   with pass rate and remaining balance; counters reset on month rollover.
 - The file lives on the host, so on Railway a redeploy resets it unless you point
   `FLANX_USAGE_FILE` at a persistent volume.
 
-**Retry ladder:** when a generated patch fails sandbox validation, Flanx regenerates
-at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the exact failure log
-injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts. Only the final
-failure is written to the brain, so the memory log stays signal, not noise.
+**Retry ladder:** when a generated patch fails sandbox validation, Max regenerates
+at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the failure log,
+up to `FLANX_FIX_ATTEMPTS` total attempts. This phase does not write failures to
+the remote brain.
 
 ## The brain
 
-`brain_memory.txt` in the target repository is Flanx's long-term memory. Every run
-appends a timestamped line (failures and successes), it is trimmed to ~12KB so it always
-fits in one prompt, and it is committed straight to the default branch so you can watch
-the bot learn in the GitHub history.
+`brain_memory.txt` in the target repository is legacy long-term memory. Max can
+read it for repair context after the repository privacy opt-in. Automatic remote
+memory updates are disabled until they can pass the same scoped approval gate.

@@ -1,4 +1,4 @@
-"""Flanx free cloud sandbox + GitHub-hosted memory ("brain") layer.
+"""Max free cloud sandbox + GitHub-hosted memory ("brain") layer.
 
 Sandbox (OnlineCompiler.io free tier, verified against their docs):
 
@@ -10,13 +10,12 @@ Documented free-plan limits: 100,000 runs/month, 30 submissions/minute,
 2 concurrent executions, 30s execution timeout, 100KB code and stdin each,
 64KB output per stream, and **no outbound network inside the sandbox**.
 
-The brain lives in ``brain_memory.txt`` inside the repository Flanx works on,
+The brain lives in ``brain_memory.txt`` inside the repository Max works on,
 so every lesson survives restarts and is reviewable in GitHub history.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,8 +33,9 @@ MAX_CODE_BYTES = 100 * 1024  # provider limit for `code`
 MAX_STDIN_BYTES = 100 * 1024  # provider limit for `input`
 
 BRAIN_FILE = "brain_memory.txt"
-BRAIN_HEADER = "# Flanx Core Memory Bank"
+BRAIN_HEADER = "# Max Core Memory Bank"
 BRAIN_MAX_CHARS = 12_000  # keep the diary small enough to fit a single prompt
+MEMORY_WRITES_ENABLED = False  # remote memory writes need scoped approval
 
 CLIP_DEFAULT = 1500
 PROMPT_CLIP = 4_000
@@ -118,7 +118,7 @@ def _parse_response(data: dict) -> SandboxResult:
 
     # Native sync shape: {status, exit_code, output, error, time, total, memory, ...}
     if data.get("exit_code") is None:
-        return SandboxResult(ok=False, error=f"Unexpected sandbox response: {clip(json.dumps(data), 300)}")
+        return SandboxResult(ok=False, error="Unexpected sandbox response shape.")
 
     return SandboxResult(
         ok=True,
@@ -153,8 +153,8 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
         )
     except requests.Timeout:
         return SandboxResult(ok=False, error=f"Sandbox did not respond within {HTTP_TIMEOUT_SECONDS:.0f}s.")
-    except requests.RequestException as exc:
-        return SandboxResult(ok=False, error=f"Could not reach the sandbox API: {clip(str(exc), 200)}")
+    except requests.RequestException:
+        return SandboxResult(ok=False, error="Could not reach the sandbox API.")
 
     if response.status_code == 401 or response.status_code == 403:
         return SandboxResult(ok=False, error="Sandbox rejected the API key (HTTP "
@@ -176,10 +176,7 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
                     "OnlineCompiler.io dashboard's API Keys page."
                 ),
             )
-        return SandboxResult(
-            ok=False,
-            error=f"Sandbox API returned HTTP {response.status_code}: {clip(response.text, 300)}",
-        )
+        return SandboxResult(ok=False, error=f"Sandbox API returned HTTP {response.status_code}.")
 
     try:
         data = response.json()
@@ -187,7 +184,7 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
         return SandboxResult(ok=False, error="Sandbox API returned a non-JSON response.")
 
     if not isinstance(data, dict):
-        return SandboxResult(ok=False, error=f"Unexpected sandbox payload: {clip(str(data), 300)}")
+        return SandboxResult(ok=False, error="Unexpected sandbox payload shape.")
     return _parse_response(data)
 
 
@@ -221,7 +218,7 @@ def _trim_brain(content: str) -> str:
 
 
 def read_flanx_brain(repo_name: str, ref: str = "main") -> str:
-    """Read Flanx's historical memory log from GitHub."""
+    """Read Max's historical memory log from GitHub."""
     try:
         repo = _client().get_repo(repo_name)
         file_obj = repo.get_contents(BRAIN_FILE, ref=ref)
@@ -230,9 +227,9 @@ def read_flanx_brain(repo_name: str, ref: str = "main") -> str:
             content = "…[older memories trimmed]…" + content[-BRAIN_MAX_CHARS:]
         return content
     except UnknownObjectException:
-        return "No historical memory matrix detected. This is a fresh operational runtime."
-    except Exception as exc:  # never let memory trouble kill a run
-        return f"Memory matrix unavailable right now: {exc}"
+        return "No repository memory found yet."
+    except Exception:  # never let memory trouble kill a run
+        return "Repository memory unavailable right now."
 
 
 def update_flanx_brain(
@@ -242,12 +239,14 @@ def update_flanx_brain(
     max_retries: int = 3,
 ) -> bool:
     """Append a timestamped lesson to ``brain_memory.txt`` on the target branch."""
+    if not MEMORY_WRITES_ENABLED:
+        return False
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     entry = f"- [{stamp}] {new_insight}"
     try:
         repo = _client().get_repo(repo_name)
-    except Exception as exc:
-        print(f"⚠️ Brain update warning (repo): {exc}")
+    except Exception:
+        print("⚠️ Brain update warning (repo unavailable).")
         return False
 
     for attempt in range(max_retries):
@@ -263,7 +262,7 @@ def update_flanx_brain(
             if sha:
                 repo.update_file(
                     BRAIN_FILE,
-                    "🤖 Flanx brain evolution matrix updated.",
+                    "🤖 Max memory updated.",
                     updated,
                     sha,
                     branch=ref,
@@ -271,18 +270,18 @@ def update_flanx_brain(
             else:
                 repo.create_file(
                     BRAIN_FILE,
-                    "🤖 Flanx brain initialization.",
+                    "🤖 Max brain initialization.",
                     updated,
                     branch=ref,
                 )
-            print("🧠 Flanx wrote a lesson to its memory layer.")
+            print("🧠 Max wrote a lesson to its memory layer.")
             return True
         except GithubException as exc:
             if exc.status == 409 and attempt < max_retries - 1:
                 continue  # concurrent write, refetch and retry
-            print(f"⚠️ Brain update warning: {exc}")
+            print(f"⚠️ Brain update warning (HTTP {exc.status}).")
             return False
-        except Exception as exc:
-            print(f"⚠️ Brain update warning: {exc}")
+        except Exception:
+            print("⚠️ Brain update warning (write failed).")
             return False
     return False
