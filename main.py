@@ -28,9 +28,9 @@ import discord
 from discord.ext import commands
 from github import Github, GithubException, UnknownObjectException
 
-from free_sandbox import clip, read_flanx_brain, run_code
-from usage import format_usage, record_llm_usage, record_sandbox_run
-from model_router import ModelError, ModelRouter
+from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
+from usage import UsageStorageError, format_usage, record_llm_usage, record_sandbox_run
+from model_router import ModelError, ModelRouter, route_model
 from prefs import get_pref
 from task_engine import ActionNotStarted, Orchestrator, Status, Task
 from approval_publish import PublishConfig, PublishError, PublishingCoordinator
@@ -171,6 +171,15 @@ Rules:
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+def _record_usage_safely(recorder, *args):
+    """Keep a usage-file problem from discarding a valid AI/sandbox result."""
+    try:
+        recorder(*args)
+    except UsageStorageError:
+        # Never log preference contents, response data, or provider credentials.
+        print("⚠️ Usage counters unavailable; continuing without recording this event.")
+
+
 def web_search(query: str) -> str:
     """Live web lookup so Max can use current documentation and recent fixes."""
     try:
@@ -368,6 +377,7 @@ CHAT_HELP = (
     "👋 **Max chat mode** — just talk to me, no prefix needed:\n"
     "• `max help me with src/app.js in owner/repo — <what to change>`\n"
     "• Mention this bot, then ask it to fix a file in owner/repo\n"
+    "• `@Max fix src/app.js in owner/repo: <what to change>`\n"
     "• `max search <query> for me`\n"
     "• `max what do you remember about owner/repo`\n"
     "• `max stats` — token usage, estimated cost and sandbox quota\n"
@@ -379,7 +389,7 @@ CHAT_HELP = (
 
 PERSONA_CARD = (
     "🤖 **I'm Max** — your coding companion and personal assistant.\n"
-    "**Coding:** prepare and validate a patch; GitHub publication needs trusted approval.\n"
+    "**Coding:** pull a file, patch it with AI, prove it in a free cloud sandbox, open a PR.\n"
     "**Web:** `max search <query> for me`.\n"
     "**Memory:** a repo brain (`max what do you remember about owner/repo`) "
     "and your private notes (`max remember …`).\n"
@@ -387,7 +397,7 @@ PERSONA_CARD = (
     "usage stats (`max stats`).\n"
     "**Extensions:** `max integrations` lists the pluggable modules — drop a new file "
     "into `integrations/` to add one.\n"
-    "No prefix needed — just start with `max` or tag me."
+    "No prefix needed — just start with `max` or tag me. (`flanx` remains a supported alias.)"
 )
 
 FILE_EXT_PATTERN = (
@@ -396,7 +406,7 @@ FILE_EXT_PATTERN = (
 )
 FILE_PATH_RE = re.compile(rf"\b[\w][\w./-]*\.(?:{FILE_EXT_PATTERN})\b", re.IGNORECASE)
 REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
-CHAT_NAME_RE = re.compile(r"^\s*(?:hey\s+|yo\s+|oi\s+)?(?:max|mex|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|hi|hello|yo|oi)\s+)?(?:max|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
 MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
 STATS_RE = re.compile(
@@ -422,6 +432,16 @@ GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 HELP_RE = re.compile(r"^\s*(?:help|what\s+can\s+you\s+do|commands)\s*$", re.IGNORECASE)
+# Troubleshooting questions should be answered conversationally, not sent to the
+# code-repair pipeline just because a pasted log happens to contain a file path.
+DIAGNOSTIC_RE = re.compile(
+    r"\b(?:what\s+does|what\s+is|why\s+(?:does|is|did|would)|explain|diagnos(?:e|is|ing)|"
+    r"investigat(?:e|ing)|troubleshoot|error\s+code|status\s+code|http\s*405|"
+    r"matrix\s+exception|exception|\b(?:error|failure)\b.*\b(?:mean|cause|happen|occur)|"
+    r"(?:sandbox|api|connection|bot).{0,35}\b(?:error|fail(?:ed|ure)?|broken|down|not\s+working|health|status)\b|"
+    r"\bcheck\s+(?:the\s+)?(?:error|logs?|sandbox|api|connection|health|status)\b)",
+    re.IGNORECASE,
+)
 FIX_VERB_RE = re.compile(
     r"^\s*(?:can\s+you\s+|pls\s+|please\s+)?"
     r"(?:help\s+me(?:\s+(?:with|to))?\s+|fix|repair|patch|update|upgrade|improve|work\s+on)\b[:\s]*",
@@ -430,9 +450,17 @@ FIX_VERB_RE = re.compile(
 
 
 def _strip_name_trigger(text: str) -> "str | None":
-    """'max help me with this' -> 'help me with this'; None when Max is not addressed."""
-    match = CHAT_NAME_RE.match((text or "").strip())
-    return match.group(1).strip() if match else None
+    """Remove Max's name while preserving a greeting such as 'hi' from 'hi max'."""
+    cleaned = (text or "").strip()
+    match = CHAT_NAME_RE.match(cleaned)
+    if not match:
+        return None
+    remainder = match.group(1).strip()
+    if not remainder:
+        greeting = re.match(r"^(hey|hi|hello|yo|oi)\s+(?:max|flanx)[!,.]?$", cleaned, re.IGNORECASE)
+        if greeting:
+            return greeting.group(1)
+    return remainder
 
 
 def _extract_repo(text: str) -> "str | None":
@@ -503,6 +531,15 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "help", {}
     repo = _extract_repo(stripped)
     file_path = _extract_file(stripped)
+    # Error reports and troubleshooting questions belong in ordinary chat, even if a
+    # pasted log or diagnostic checklist happens to mention a file path. Only preserve
+    # repair routing when the user explicitly requests a change and supplies both a
+    # repository and a target file.
+    if DIAGNOSTIC_RE.search(stripped) and not (
+        repo and file_path and FIX_VERB_RE.match(stripped)
+    ):
+        # Preserve question marks/punctuation in the conversational request.
+        return "general", {"prompt": (text or "").strip()}
     # Only enter the code-repair workflow when the user gives a repair/update verb,
     # a repository, or a file path. Ordinary questions should receive an answer.
     if not (repo or file_path or FIX_VERB_RE.match(stripped)):
@@ -519,7 +556,7 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
 # --------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    print(f"🤖 Max online as {bot.user} (chat mode + pending repository actions)")
+    print(f"🤖 Max online as {bot.user} (chat mode + free sandbox + cloud task staging)")
     await bot.change_presence(
         activity=discord.Game(name="just say 'max …' · !max_fix · !update_repo")
     )
@@ -809,10 +846,10 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             asyncio.to_thread(run_code, original_code),
         )
         baseline_report = baseline.for_prompt("baseline run")
-        if any(CREDENTIAL_RE.search(item) for item in (past_memories, live_web_intel, baseline_report)):
+if any(CREDENTIAL_RE.search(item) for item in (past_memories, live_web_intel, baseline_report)):
             await ctx.send("⚠️ Repair stopped because context may contain credentials. No model call or repository write was made.")
             return
-        record_sandbox_run(baseline)
+        _record_usage_safely(record_sandbox_run, baseline)
         if not baseline.ok:
             await ctx.send(f"⚠️ **Sandbox unreachable — aborting.** {baseline.error}")
             return
@@ -858,7 +895,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
                 f"🔄 Validating the patch in the free sandbox (attempt {attempt}/{FIX_ATTEMPTS})..."
             )
             validation = await asyncio.to_thread(run_code, raw_patch)
-            record_sandbox_run(validation)
+            _record_usage_safely(record_sandbox_run, validation)
             if validation.passed:
                 break
             retry_feedback = (

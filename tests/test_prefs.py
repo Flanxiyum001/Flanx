@@ -70,5 +70,30 @@ class PreferenceStorageTests(unittest.TestCase):
         self.assertEqual(prefs.list_notes(42), ["remember this"])
 
 
+    def test_nested_invalid_user_shape_preserves_original_file(self):
+        for payload in (
+            {"users": {"42": None}},
+            {"users": {"42": {"prefs": [], "notes": []}}},
+            {"users": {"42": {"prefs": {}, "notes": "not a list"}}},
+            {"users": {"42": {"prefs": {}, "notes": [17]}}},
+        ):
+            with self.subTest(payload=payload):
+                original = json.dumps(payload).encode("utf-8")
+                self.write_bytes(original)
+                with self.assertRaises(prefs.PreferenceStorageError):
+                    prefs.add_note(42, "must not overwrite")
+                self.assertEqual(self.read_bytes(), original)
+
+    def test_interrupted_replace_preserves_original_and_cleans_temp(self):
+        prefs.set_pref(42, "timezone", "UTC")
+        original = self.read_bytes()
+        with patch.object(prefs.os, "replace", side_effect=PermissionError("blocked")):
+            with self.assertRaises(prefs.PreferenceStorageError):
+                prefs.set_pref(42, "timezone", "Asia/Kolkata")
+        self.assertEqual(self.read_bytes(), original)
+        self.assertFalse(any(name.startswith(".flanx-prefs-")
+                             for name in os.listdir(self.temp.name)))
+
+
 if __name__ == "__main__":
     unittest.main()

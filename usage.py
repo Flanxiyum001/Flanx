@@ -12,6 +12,7 @@ endpoint so the counter reports real spend.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from copy import deepcopy
@@ -26,6 +27,10 @@ PRICE_PER_M_OUTPUT = float(os.getenv("AI_OUTPUT_PRICE_PER_M", "0") or 0)
 _lock = threading.Lock()
 
 
+class UsageStorageError(RuntimeError):
+    """Raised when usage counters cannot be read or safely persisted."""
+
+
 def _empty() -> dict:
     return {
         "llm": {
@@ -36,7 +41,7 @@ def _empty() -> dict:
             "cost_usd": 0.0,
             "by_model": {},
         },
-        "sandbox": {},  # month keys ("YYYY-MM") map to {runs, passed, failed}
+        "sandbox": {},
     }
 
 
@@ -48,19 +53,58 @@ def _load() -> dict:
     try:
         with open(USAGE_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        base = _empty()
-        base["llm"].update(data.get("llm", {}))
-        base["sandbox"].update(data.get("sandbox", {}))
-        return base
-    except (FileNotFoundError, ValueError, OSError):
+    except FileNotFoundError:
         return _empty()
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise UsageStorageError(
+            f"Could not read usage storage at {USAGE_FILE!r}; refusing to reset it."
+        ) from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("llm"), dict) or not isinstance(data.get("sandbox"), dict):
+        raise UsageStorageError(
+            f"Usage storage at {USAGE_FILE!r} has an invalid structure; refusing to reset it."
+        )
+    base = _empty()
+    base["llm"].update(data["llm"])
+    base["sandbox"].update(data["sandbox"])
+    llm = base["llm"]
+    counters = ("calls", "prompt_tokens", "completion_tokens", "total_tokens")
+    valid_number = lambda n: isinstance(n, int) and not isinstance(n, bool) and n >= 0
+    if any(not valid_number(llm.get(key, 0)) for key in counters):
+        raise UsageStorageError("Invalid usage counters; refusing to reset or overwrite.")
+    cost = llm.get("cost_usd", 0)
+    if (isinstance(cost, bool) or not isinstance(cost, (int, float))
+            or not math.isfinite(cost) or cost < 0):
+        raise UsageStorageError("Invalid usage cost; refusing to reset or overwrite.")
+    if not isinstance(llm.get("by_model"), dict):
+        raise UsageStorageError("Invalid usage model counters; refusing to reset or overwrite.")
+    for entry in llm["by_model"].values():
+        if (not isinstance(entry, dict)
+                or any(not valid_number(entry.get(key, 0)) for key in counters)):
+            raise UsageStorageError("Invalid per-model usage counters; refusing to overwrite.")
+    for month in base["sandbox"].values():
+        if (not isinstance(month, dict)
+                or any(not valid_number(month.get(key, 0))
+                       for key in ("runs", "passed", "failed"))):
+            raise UsageStorageError("Invalid sandbox usage counters; refusing to overwrite.")
+    return base
 
 
 def _save(data: dict) -> None:
     tmp = f"{USAGE_FILE}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-    os.replace(tmp, USAGE_FILE)  # atomic: never leaves a half-written counter file
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, USAGE_FILE)
+    except (OSError, UnicodeError) as exc:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise UsageStorageError(f"Could not save usage storage at {USAGE_FILE!r}.") from exc
 
 
 def _field(obj, key: str, default=0):

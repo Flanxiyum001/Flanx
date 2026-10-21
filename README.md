@@ -1,11 +1,15 @@
 # Max
 
-A Discord coding assistant. Repository repair prepares and validates a patch.
-Publishing a branch and pull request requires an authenticated Discord approval
-and explicit configuration for one test repository. Publishing is off by default.
+Max is your self-correcting Discord coding companion. It pulls a file from GitHub, recalls past
+lessons, searches the live web, proves the fix inside a **free** OnlineCompiler.io
+sandbox, learns from the result, and opens a pull request — all from a Discord command.
+
+Repository repair prepares and validates a patch. Publishing a branch and pull request requires
+an authenticated Discord approval and explicit configuration for one test repository.
+Publishing is off by default.
 
 ```
-!max_fix owner/repo src/app.py add retry logic around the HTTP call
+max fix src/app.py in owner/repo: add retry logic around the HTTP call
 ```
 
 ## Pipeline
@@ -94,9 +98,9 @@ The old production write handlers remain disabled.
 
 ## GitHub repository workflows
 
-Mention the bot account or prefix a message with `max` for these actions:
+Use Max by mentioning **@Max** or starting a message with `max`. The previous trigger remains available for backward compatibility:
 
-- `max repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `max repos 2` opens the next page.
+- `max repos` — list the first page of repositories visible to `GITHUB_TOKEN`; `max repos 2` opens the next page. (repository commands are also available through the Max chat trigger.)
 - `max use owner/repo` — verify access and save a per-user default repository.
 - `max current repo` — show your saved repository.
 - `max inspect owner/repo` — read repository metadata, root entries, `AGENTS.md` (if present), and `README.md`; this does not execute code or change files.
@@ -105,31 +109,30 @@ Repository discovery is read-only. The token can only list repositories permitte
 
 ## Commands
 
+- `max fix <path/to/file.py> in <owner/repo>: <what to change>` — run the full repair cycle
+- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
+  fresh branch for an external agent session to execute
+- `max what do you remember about <owner/repo>` — show the repository's saved lessons
+- `max stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 - `!max_fix <owner/repo> <path/to/file.py> <what to change>` — validate a patch and request approval for a configured test repository (requires repository privacy opt-in)
-- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — prepare a pending task manifest action
 - `!max_publish_status <task-id>` — authorized, read-only reconciliation of a test publishing operation
 - `!max_brain <owner/repo>` — print what Max remembers for that repository
-- `!max_stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 
-All of these also work as plain chat (`max …` or a bot mention) — see **Chat mode** below.
-
-For existing users, the `mex` and `flanx` chat triggers and their matching
-`!mex_*` and `!flanx_*` command spellings remain accepted. They are compatibility
-inputs; the bot identifies itself as Max in replies and new task output.
+For the recommended Max-first interface, use the plain-chat examples below. Older prefix commands remain available for backward compatibility.
 
 ## Chat mode (no prefix needed)
 
-Talk to Max in plain chat — it answers when you **mention the bot account** or start a
-message with `max` (case-insensitive; `hey max` and `max,` also work):
+Talk to Max in plain chat — it answers when you **mention it** (`@Max …`) or start a
+message starting with `max` (case-insensitive; `hi max`, `hey max`, `hello max`, and `max,` work). The previous trigger remains a backward-compatible alias:
 
 | You type | Max does |
 | --- | --- |
-| `max help me with src/app.js in owner/repo — add retry logic` | runs the full `!max_fix` repair pipeline |
-| Mention the bot, then say `fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
+| `max help me with src/app.js in owner/repo — add retry logic` | runs the full repair pipeline |
+| `@Max fix src/app.js in owner/repo: upgrade to argon2id` | same pipeline, via mention |
 | `max search python 3.14 changes for me` | live web search, results posted back |
 | `max what do you remember about owner/repo` | prints that repo's brain memory |
 | `max stats` / `max how many tokens have you used` | usage: tokens, cost, sandbox quota |
-| `max yo sup` / `max how are you` / `max who are you` | friendly companion replies (no fix-request nagging) |
+| `hi max` / `max how are you` / `max who are you` | friendly companion replies (no fix-request nagging) |
 | `max set timezone Asia/Kolkata` | saves **your** timezone (per Discord user, remembered) |
 | `max what time is it` | current time in your saved timezone (or `max time in America/New_York`) |
 | `max remember <anything>` / `max show notes` | personal notes, stored per user |
@@ -143,7 +146,7 @@ don't address Max are ignored.
 
 ### Companion behaviour
 
-Max recognises greetings (`yo sup`, `good morning`), `how are you`, `who are you`,
+Max recognises greetings (`hi max`, `yo sup`, `good morning`), `how are you`, `who are you`,
 `thanks`, time/timezone requests and personal notes — all answered conversationally
 instead of being treated as broken GitHub commands. Timezones and notes are stored per
 Discord user in `flanx_prefs.json` (git-ignored; point `FLANX_PREFS_FILE` at a
@@ -160,12 +163,13 @@ dormant).
 2. Fill in the contract:
    ```python
    NAME = "weather"                    # slug used by the router
-   DESCRIPTION = "current weather"     # shown by `max integrations`
-   USAGE = ["max weather in Pune"]   # example phrase
+
+   DESCRIPTION = "current weather"     # shown in Max's integration registry
+   USAGE = ["max weather in Pune"]      # example phrase
    def match(text: str) -> dict | None  # claim a message -> payload, else None
    async def handle(event, payload) -> str  # do the work, return the reply
    ```
-3. Restart the bot. `max integrations` now lists it, and any chat message its
+3. Restart Max. The integration registry now includes it, and any chat message its
    `match()` claims is routed to `handle()` — search/stats/fix intents keep priority
    over your claims only where they are checked first, so keep `match()` anchored and
    specific.
@@ -179,13 +183,28 @@ modules, proving the contract.
 
 ## Cloud staging with `!update_repo`
 
-`!update_repo` prepares a manifest proposal:
+Instead of running heavy work on the Railway box, Max can **stage** it:
 
 1. `!update_repo username/my-app src/auth.js "Upgrade encryption to argon2id"`
-2. Max reads the target repository and builds `tasks/update-job-<id>.md` with
-   the objective and a definition-of-done checklist.
-3. The task engine returns a pending approval request bound to the repository,
-   branch, manifest path, and exact payload. No branch or manifest is created.
+2. Max branches off the default branch (`flanx-evolution-<id>`), writes
+   `tasks/update-job-<id>.md` containing your objective plus a definition-of-done
+   checklist, commits it to that branch, and replies with a Discord embed linking the
+   **branch** and the **manifest file** on GitHub.
+3. An agent session (Freebuff Cloud with the repo connected, or Codebuff) reads the
+   manifest together with `knowledge.md`, applies the change, validates it, and opens the
+   PR per the checklist.
+
+Max also patches files directly through `max fix ...`, using
+the free OnlineCompiler.io sandbox, so nothing depends on an external trigger.
+
+> **Honest scope note:** what is verified is the Git staging (branch + manifest + GitHub
+> links), the `knowledge.md` convention (documented for Codebuff, which Freebuff is built
+> on), and Freebuff's "Connect a repository" entry point. What is **not** publicly
+> documented is an automatic push→agent→PR webhook, so the embed deliberately does not
+> promise one — it tells you where the task is staged and how to run it.
+
+The task engine returns a pending approval request bound to the repository,
+branch, manifest path, and exact payload. No branch or manifest is created without approval.
 
 ## Environment variables
 
@@ -228,9 +247,10 @@ startup does not migrate or delete legacy JSON. A missing database is new
 empty storage; an existing invalid/unreadable SQLite file causes an error.
 The built-in `sqlite3` library requires no new dependency.
 
-**Railway volume prerequisite:** Provision and attach a *real* persistent
-volume to the service before cutover, verify the mount path and writable
-filesystem, and configure `MAX_LESSONS_DB` to a file on the mount.
+**Railway volume prerequisite:** First inventory, extract, and independently
+verify recoverable copies of existing data *outside* the running ephemeral
+container. Only then attach a real volume, restore the checked copies to that
+mount, and configure `MAX_LESSONS_DB` to a file on it.
 `/data/max_lessons.sqlite3` is only an example if the service really has
 a Railway volume mounted at `/data`. An absolute path or `/data` prefix
 does not prove persistence. Use one writer service against this local SQLite
@@ -238,6 +258,53 @@ database; do not share it through an unsuitable network volume.
 Preferences remain JSON: configure `FLANX_PREFS_FILE` (for example
 `/data/flanx_prefs.json` on a verified volume) separately. This change
 does not modify `prefs.py`.
+
+**Storage preflight (no production changes without approval):**
+
+The proposed `storage_admin.py` utility inventories all four stores and
+makes a validated offline backup without printing lesson text, notes, or usage
+values:
+
+```sh
+python storage_admin.py --inventory
+# Explicitly classify each missing store only after reviewing its inventory/history.
+python storage_admin.py --backup-dir /safe/new-backup-dir \
+  --allow-missing lessons_db \
+  --allow-missing legacy_lessons_json \
+  --allow-missing preferences \
+  --allow-missing usage
+python storage_admin.py --verify-backup /safe/new-backup-dir
+```
+
+Run these commands only in the environment that actually contains the real
+state files; a local repository checkout or new container is **not** a
+production backup. An inventory distinguishes missing paths (historical
+existence unknown), valid empty files, valid files with records, corrupt files,
+unreadable files, and inaccessible paths. A backup now refuses any missing
+store unless it is explicitly classified with repeated `--allow-missing STORE`
+flags. Use that only after reviewing whether the store was genuinely never
+initialized or is not required for this recovery point; the decision is recorded
+in the manifest and independently checked during verification. If a store is
+known to have existed, supply `--expect-existing STORE` when inventorying or
+backing up; missing expected stores block backup. A file not present at its
+current path does not prove it never existed.
+
+The SQLite snapshot uses the online backup API and includes committed WAL
+data. The manifest records source paths, backup checksums, counts, and
+integrity results; verification works on copies without reading originals.
+Reject incomplete or all-missing backups and preserve partial results for
+diagnosis. **Copy the complete verified backup directory and its manifest to
+durable restricted storage outside Railway before any deployment or volume
+operation.** A manifest is not a cryptographic signature: independently
+preserve trusted hashes and restrict backup access.
+
+To migrate safely, stop or quiesce all writes, capture a final consistent
+snapshot, restore to a prepared volume, compare file hashes and record counts,
+then change configured paths and deploy under explicit approval. Recheck
+persistence after startup and a controlled restart. If failure occurs, keep
+both old backups and the new volume untouched, and preserve current data
+before any rollback. Never mount an empty volume or restart/redeploy merely
+to gain filesystem access to current ephemeral state.
 
 **Before cutover (bot stopped, no concurrent lesson writes):**
 
@@ -255,8 +322,11 @@ does not modify `prefs.py`.
    `distinct_signatures`, `inserted`, `updated`,
    `skipped_identical_source_duplicates`, and `conflicting_records`.
    Identical repeated records count as explicit skips; divergent duplicates
-   cause a clear error. Import rejects ID or signature collisions with
-   *different* destination identities rather than overwriting them.
+   cause a clear error. A rerun with matching destination records does not
+   rewrite them. If a source record differs from an existing destination
+   record (even when ID/signature match), migration refuses to overwrite
+   potentially newer SQLite data. The historical `updated` report count
+   denotes matched destination records, not SQL UPDATE executions.
 4. The runtime keeps at most **500** lessons. Migration refuses to run if
    the source has more than 500 distinct signatures or if existing destination
    records plus new imports would exceed 500. **Nothing is pruned during
@@ -328,7 +398,7 @@ Local Ollama is the default. See [Local inference and privacy](docs/LOCAL_INFERE
 
 ## English-only output
 
-Some configured models may occasionally answer in Chinese.
+FreeLLM routes to Chinese models (Qwen/DeepSeek) that occasionally answer in Chinese. Some configured models may occasionally answer in Chinese.
 Max is English 24/7 through two layers:
 
 1. **Prompt rule** — the system prompt demands English and forbids new non-English
@@ -356,12 +426,15 @@ itself and are always English.
   `FLANX_USAGE_FILE` at a persistent volume.
 
 **Retry ladder:** when a generated patch fails sandbox validation, Max regenerates
-at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the failure log,
-up to `FLANX_FIX_ATTEMPTS` total attempts. This phase does not write failures to
-the remote brain.
+at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the exact failure log
+injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts. Only the final
+failure is written to the brain, so the memory log stays signal, not noise.
 
 ## The brain
 
-`brain_memory.txt` in the target repository is legacy long-term memory. Max can
-read it for repair context after the repository privacy opt-in. Automatic remote
-memory updates are disabled until they can pass the same scoped approval gate.
+`brain_memory.txt` in the target repository is Max's long-term memory. Every run
+appends a timestamped line (failures and successes), it is trimmed to ~12KB so it always
+fits in one prompt, and it is committed straight to the default branch so you can watch
+the bot learn in the GitHub history. Max can read it for repair context after the
+repository privacy opt-in. Automatic remote memory updates are disabled until they can
+pass the same scoped approval gate.
