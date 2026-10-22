@@ -28,6 +28,7 @@ class RepositoryGateTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.repo = MagicMock()
         self.repo.default_branch = "main"
+        self.repo.private = False
         file_obj = MagicMock()
         file_obj.decoded_content = b"print('old')\n"
         self.repo.get_contents.return_value = file_obj
@@ -55,7 +56,8 @@ class RepositoryGateTests(unittest.IsolatedAsyncioTestCase):
             typing=self.channel.typing, send=self.channel.send,
             message=SimpleNamespace(created_at=datetime.now(timezone.utc)),
         )
-        with patch.object(main.gh, "get_repo", return_value=self.repo):
+        with patch.dict("os.environ", {"MAX_GITHUB_ALLOWED_USER_IDS": "42"}), \
+             patch.object(main.gh, "get_repo", return_value=self.repo):
             await main.update_repo.callback(ctx, "owner/repo", "app.py", instruction="Change behavior")
         self.assert_no_github_writes()
         self.assertTrue(any("pending approval" in str(reply) for reply in self.channel.replies))

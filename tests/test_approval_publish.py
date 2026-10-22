@@ -272,6 +272,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
     async def test_fix_command_prepares_discord_view_without_write(self):
         channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(edit=AsyncMock())))
         result = SandboxResult(ok=True, exit_code=0)
+        self.repo.private = False
         with (patch.object(main, "publisher", self.service),
               patch.object(main, "MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT", True),
               patch.object(main.gh, "get_repo", return_value=self.repo),
@@ -334,7 +335,8 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         send = AsyncMock()
         ctx = SimpleNamespace(author=SimpleNamespace(id=42), typing=typing, send=send,
                               message=SimpleNamespace(created_at=datetime.now(timezone.utc)))
-        with (patch.object(main, "publisher", self.service),
+        with (patch.dict("os.environ", {"MAX_GITHUB_ALLOWED_USER_IDS": "42"}),
+              patch.object(main, "publisher", self.service),
               patch.object(main.gh, "get_repo", return_value=self.repo)):
             await main.update_repo.callback(ctx, "owner/test-repo", "app.py", instruction="Change")
         self.assertEqual(self.repo.writes, [])

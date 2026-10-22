@@ -19,7 +19,13 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 USAGE_FILE = os.getenv("FLANX_USAGE_FILE", "flanx_usage.json")
-SANDBOX_MONTHLY_QUOTA = 100_000  # OnlineCompiler.io free-plan runs per calendar month
+# The provider's public pricing and technical docs have disagreed on monthly
+# quotas; no local counter can prove remaining remote account allowance.
+# An optional operator supplied figure is only an estimate, not live usage.
+try:
+    SANDBOX_MONTHLY_QUOTA = max(0, int(os.getenv("SANDBOX_MONTHLY_QUOTA", "0")))
+except ValueError:
+    SANDBOX_MONTHLY_QUOTA = 0
 
 PRICE_PER_M_INPUT = float(os.getenv("AI_INPUT_PRICE_PER_M", "0") or 0)
 PRICE_PER_M_OUTPUT = float(os.getenv("AI_OUTPUT_PRICE_PER_M", "0") or 0)
@@ -143,7 +149,7 @@ def record_llm_usage(model: str, usage) -> dict:
 
 
 def record_sandbox_run(result) -> dict:
-    """Count one sandbox execution against this month's free quota."""
+    """Record one local sandbox call (not provider-verified monthly usage)."""
     passed = bool(getattr(result, "passed", False))
     with _lock:
         data = _load()
@@ -185,9 +191,16 @@ def format_usage() -> str:
     if len(by_model) > 5:
         lines.append(f"  • …and {len(by_model) - 5} more model(s)")
 
+    if SANDBOX_MONTHLY_QUOTA:
+        quota = (
+            f" · {left:,} estimated remaining of "
+            f"{SANDBOX_MONTHLY_QUOTA:,} locally configured allowance"
+        )
+    else:
+        quota = " · live provider allowance not checked"
     lines.append(
-        f"**Sandbox ({month_label}):** {used:,} / {SANDBOX_MONTHLY_QUOTA:,} runs used "
-        f"({pass_rate:.0f}% passed) · {left:,} left on the free plan"
+        f"**Sandbox ({month_label}):** {used:,} requests recorded locally "
+        f"({pass_rate:.0f}% passed){quota}"
     )
     lines.append("_Cost shows $0 on a free token pool; set AI_INPUT_PRICE_PER_M / AI_OUTPUT_PRICE_PER_M for paid endpoints._")
     return "\n".join(lines)
