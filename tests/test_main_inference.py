@@ -1,11 +1,13 @@
 """Discord entry points use the shared router and handle safe provider failures."""
 
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
 from model_router import ModelError, ModelReply
+from task_engine import Orchestrator, Status, Task
 
 
 class MainInferenceTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +24,21 @@ class MainInferenceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "model_router", fake):
             reply = await main.generate_assistant_reply("hi")
         self.assertIn("unavailable", reply)
+
+    async def test_task_status_fails_with_safe_provider_diagnostic(self):
+        fake = SimpleNamespace(generate=AsyncMock(side_effect=ModelError(
+            "missing_credentials", "FreeLLM requires AI_API_KEY.")))
+        with tempfile.TemporaryDirectory() as folder, patch.object(main, "model_router", fake):
+            engine = Orchestrator(store_path=folder + "/tasks.db")
+            engine.register("general_chat", "model.reply", main._general_chat_handler,
+                            valid_input=lambda p: isinstance(p, str),
+                            valid_result=lambda r: isinstance(r, str) and bool(r))
+            task = Task.new("General chat response via FreeLLM", "general_chat",
+                            permitted_tools={"model.reply"})
+            outcome = await engine.run(task, "hello")
+        self.assertEqual(outcome.task.status, Status.FAILED)
+        self.assertEqual(outcome.task.error_code, "model_missing_credentials")
+        self.assertIn("AI_API_KEY", outcome.error)
 
     async def test_patch_uses_source_route(self):
         fake = SimpleNamespace(generate=AsyncMock(return_value=ModelReply(

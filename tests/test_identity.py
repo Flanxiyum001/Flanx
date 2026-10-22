@@ -75,7 +75,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                            return_value="A short reply") as model_reply,
               patch.object(main.bot, "process_commands", new_callable=AsyncMock) as commands):
             await main.on_message(message)
-        model_reply.assert_awaited_once_with("tell me a joke", task="general")
+        model_reply.assert_awaited_once_with("tell me a joke", task="general", raise_on_error=True)
         commands.assert_awaited_once_with(message)
         self.assertEqual(replies, ["A short reply"])
 

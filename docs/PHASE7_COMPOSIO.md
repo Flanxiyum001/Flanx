@@ -23,13 +23,14 @@ accounts or increasing volume. No paid plan is assumed by Max.
 
 ## Setup for a dedicated test account
 
-1. Create a separate Composio project and connect a dedicated test account
-   using a dashboard auth config or Composio Connect Link. Grant minimal scopes.
-   Hosted links are created with `connected_accounts.link(user_id, auth_config_id)`.
+1. Create a separate Composio project and a toolkit auth config for a
+   dedicated test account. Grant minimal scopes. Max creates hosted links
+   through `connected_accounts.link(user_id, auth_config_id)` after setup.
 2. Install the optional SDK with `python -m pip install -r requirements-composio.txt`.
    It is not needed when Composio is disabled.
 3. Copy `docs/composio-policy.example.json` to a private file under `.max_state`.
-   Replace account ID, Composio user ID, action slug, and exact tool version.
+   Replace account ID, Composio user ID (`max-discord-<your-ID>` for a new
+   conversational connection), action slug, and exact tool version.
    Inspect the action via `Composio(api_key=...).tools.get_raw_composio_tool_by_slug(slug)`
    and use the returned input schema and version. Unsupported schema features
    fail closed; do not guess required parameters or version.
@@ -46,6 +47,41 @@ accounts or increasing volume. No paid plan is assumed by Max.
    DM before approving. Inspect the external account afterward. Never repeat
    an uncertain write; use `!max_tool_status <task_id>` and read-only service
    inspection to reconcile it.
+
+## Conversational connections
+
+The optional `composio==0.18.2` SDK provides `connected_accounts.link`, `list`,
+`get`, `wait_for_connection`, and `delete`. Max uses the hosted Connect Link and
+explicit status checks; it never handles OAuth passwords or tokens. The pinned
+SDK does not expose `connected_accounts.revoke`, so disconnect deletes the
+Composio connection. Check the provider's connected-app settings if you need
+to verify upstream revocation. See the [Connect Link guide](https://docs.composio.dev/docs/tools-direct/authenticating-tools)
+and [Python connected accounts reference](https://docs.composio.dev/reference/sdk-reference/python/connected-accounts).
+
+In the private `MAX_COMPOSIO_POLICY_FILE`, add `connections` mapping exact
+toolkit slugs to existing Composio auth config IDs, for example `github` and
+`googlecalendar`. The example policy shows the shape. Max checks that the
+auth config belongs to the requested toolkit. Set `COMPOSIO_API_KEY`,
+`MAX_COMPOSIO_ENABLED=true`, `MAX_EXTERNAL_ACTIONS_DISABLED=false`, and
+`MAX_APPROVER_DISCORD_IDS` to trusted Discord user IDs. The policy and SDK
+must be available at startup. No connection is created when they are missing.
+
+An authorized owner can write `Max, connect to GitHub`, `Max, connect to Google
+Calendar`, `Show my connected apps`, `What permissions does my GitHub connection
+have?`, or `Disconnect GitHub`. Deterministic commands are `!max_connect
+<toolkit>`, `!max_connections`, `!max_connection_status <toolkit-or-account-id>`,
+and `!max_disconnect <toolkit-or-account-id>`. Max sends links and account
+details by DM, even when the request came from a server channel. The owner
+completes consent on the hosted page, then checks status; only `ACTIVE` is
+reported as connected. `INITIALIZING` and `INITIATED` remain pending, and
+`EXPIRED` requires a fresh link. Every operation binds to the Discord account's
+derived `max-discord-<id>` Composio user ID and verifies account ownership.
+
+Connection details include the account ID, status, reported scopes when
+available, and action categories explicitly configured for that account.
+Connecting does not add actions to the policy or run them. `!max_tool` retains
+the action allowlist and per-write approval. With multiple accounts for one
+toolkit, use the exact account ID from `!max_connections`; Max will not guess.
 
 ## Policy and limits
 
@@ -88,8 +124,32 @@ from normal listing. External task completion records minimal task feedback;
 it does not create a factual memory. Existing verified repository lessons
 remain in their own database.
 
-The existing `ModelRouter` uses loopback Ollama by default. FreeLLM is only
-used when its cloud provider and per-data-class privacy options are configured.
+The existing `ModelRouter` uses loopback Ollama by default. `AI_MODEL=auto`
+selects a model on the FreeLLM gateway; it does not select FreeLLM as Max's
+provider. For the Railway-hosted FreeLLM service, keep its existing private
+`AI_BASE_URL` ending in the OpenAI-compatible API base path (usually `/v1`),
+set `AI_API_KEY`, `AI_MODEL=auto`, `MAX_INFERENCE_PROVIDER=freellm`, and
+`MAX_INFERENCE_POLICY=cloud_allowed`. `cloud` remains a compatibility alias
+for `freellm`. Discord chat is classified as `private_repo`, so it also needs
+`MAX_ALLOW_CLOUD_PRIVATE_REPO=true` after the owner approves that data flow.
+Repair prompts include `source` and `memory` and require both
+`MAX_ALLOW_CLOUD_SOURCE=true` and `MAX_ALLOW_CLOUD_MEMORY=true` (or the broad
+`MAX_ALLOW_CLOUD_PRIVATE_CONTEXT=true` opt-in). The bot never infers cloud
+consent from the URL or API key.
+`MAX_INFERENCE_PROVIDER=auto` prefers Ollama and uses FreeLLM after a local
+failure only when `MAX_AUTO_CLOUD_FALLBACK=true`, the cloud policy is enabled,
+and the request's data classes allow it. Private chat, source, and memory
+remain blocked unless the corresponding existing cloud privacy options grant
+them. The router reports provider-specific missing key, disabled policy,
+connection, timeout, rate limit, request rejection, and invalid response
+errors without echoing provider bodies or credentials. It logs provider,
+task name, and data classes only; task descriptions contain the selected route.
+If chat says Ollama is unavailable, verify `MAX_INFERENCE_PROVIDER` first:
+leaving it unset selects local Ollama even when `AI_BASE_URL` is configured.
+Check `AI_BASE_URL` and `AI_MODEL` privately against the deployed FreeLLM
+service. No live provider call is part of the offline tests.
+
+FreeLLM is only used when its provider and per-data-class privacy options are configured.
 Cloud requests now also redact common credential labels, token prefixes, and
 private-key blocks before transmission. Redaction is a backup control, not a
 guarantee against every secret format. Composio results are not passed to

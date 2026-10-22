@@ -216,7 +216,7 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `AI_API_KEY` | cloud only | Key for the optional OpenAI-compatible endpoint |
 | `GITHUB_TOKEN` | yes | Fine-grained PAT with contents + pull-requests write on the target repo |
 | `ONLINE_COMPILER_API_KEY` | yes | Free key from the OnlineCompiler.io dashboard (API Keys page) |
-| `AI_BASE_URL` | no | default `https://freellmapi.co/v1` |
+| `AI_BASE_URL` | FreeLLM only | explicit OpenAI-compatible base URL for your deployed FreeLLM service; no default public gateway |
 | `AI_MODEL` | no | legacy model ID override; local default is `qwen3:8b` |
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
@@ -224,8 +224,9 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `FLANX_FIX_ATTEMPTS` | no | retry-ladder depth, `1`–`3` (default `2` = first try + one retry) |
 | `AI_RETRY_MODEL` | no | second model used for retries; unset = same model at temperature 0 |
 | `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT` | no | default false; explicit opt-in for the remote repository repair workflow |
-| `MAX_INFERENCE_PROVIDER` | no | `local` (default) or `cloud` |
+| `MAX_INFERENCE_PROVIDER` | no | `local` (default), `freellm`, or `auto`; `cloud` is a compatibility alias |
 | `MAX_INFERENCE_POLICY` | no | `local_only` (default) or `cloud_allowed` |
+| `MAX_AUTO_CLOUD_FALLBACK` | no | default false; permits `auto` to try FreeLLM after Ollama fails only when policy and data class allow it |
 | `MAX_ALLOW_CLOUD_PRIVATE_CONTEXT` | no | default false; additional opt-in for cloud inference with chat, source, or memory |
 | `MAX_TASK_DB` | no | local SQLite task metadata path (default `.max_state/tasks.sqlite3`) |
 | `MAX_CHECK_TIMEOUT_SECONDS` | no | local compile-check deadline (default 10 seconds, maximum 30) |

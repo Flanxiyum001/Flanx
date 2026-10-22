@@ -35,6 +35,16 @@ class ActionNotStarted(Exception):
     """Trusted handler certifies that no external action was attempted."""
 
 
+class TaskFailure(Exception):
+    """A safe, bounded diagnostic that the handler may show to its requester."""
+
+    def __init__(self, code: str, message: str):
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            raise ValueError("Invalid task failure code")
+        self.code = code
+        super().__init__(_safe_metadata(message, "failure message"))
+
+
 class ApprovalStatus(str, Enum):
     NOT_REQUIRED = "not_required"
     PENDING = "pending"
@@ -472,6 +482,8 @@ class Orchestrator:
                         if current.status in (Status.CANCELLED, Status.INTERRUPTED):
                             return Outcome(current, error="Task stopped.")
                         return self._fail(current, "action_not_started", "External action was not started.")
+                except TaskFailure as exc:
+                    return await self._finish_failure(task.task_id, exc.code, str(exc))
                 except Exception:
                     async with self._lock:
                         current = self._tasks[task.task_id]

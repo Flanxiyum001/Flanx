@@ -33,7 +33,7 @@ from free_sandbox import clip, read_flanx_brain, run_code, update_flanx_brain
 from usage import UsageStorageError, format_usage, record_llm_usage, record_sandbox_run
 from model_router import ModelError, ModelRouter, route_model
 from prefs import get_pref
-from task_engine import ActionNotStarted, Orchestrator, Status, Task
+from task_engine import ActionNotStarted, Orchestrator, Status, Task, TaskFailure
 from approval_publish import PublishConfig, PublishError, PublishingCoordinator
 from composio_adapter import ComposioAdapter, IntegrationError
 from external_actions import ExternalActionService
@@ -249,7 +249,6 @@ async def generate_patch(
     temperature: float = 0.1,
     retry_feedback: str = "",
 ) -> str:
-    model = model or model_router.selected_model("coding")
     system_prompt = SYSTEM_PROMPT.format(
         memory=clip(memory, CONTEXT_CHAR_BUDGET),
         web_intel=web_intel,
@@ -464,6 +463,29 @@ FIX_VERB_RE = re.compile(
     r"(?:help\s+me(?:\s+(?:with|to))?\s+|fix|repair|patch|update|upgrade|improve|work\s+on)\b[:\s]*",
     re.IGNORECASE,
 )
+CONNECTION_INTENT_RE = re.compile(
+    r"^\s*(?:(?P<connect>connect(?:\s+(?:to|my))?)|"
+    r"(?P<disconnect>disconnect|unlink)|"
+    r"(?P<status>connection\s+status(?:\s+for)?|check\s+(?:my\s+)?connection(?:\s+to)?)|"
+    r"(?P<permissions>what\s+permissions\s+does\s+my)|"
+    r"(?P<list>show\s+my\s+connected\s+apps|list\s+my\s+connections|connected\s+apps))"
+    r"(?:\s+(?P<toolkit>[A-Za-z][A-Za-z0-9 _-]{0,50}?))?"
+    r"(?:\s+connection\s+have)?\s*[?.!]*\s*$", re.IGNORECASE)
+
+
+def connection_intent(text: str) -> dict | None:
+    """Only anchored connection phrases can initiate account management."""
+    match = CONNECTION_INTENT_RE.fullmatch(text or "")
+    if not match:
+        return None
+    operation = next(name for name in ("connect", "disconnect", "status", "permissions", "list")
+                     if match.group(name) is not None)
+    raw = (match.group("toolkit") or "").strip().lower()
+    aliases = {"google calendar": "googlecalendar"}
+    toolkit = aliases.get(raw, raw.replace(" ", ""))
+    if operation != "list" and not toolkit:
+        return None
+    return {"operation": operation, "toolkit": toolkit}
 
 
 def _strip_name_trigger(text: str) -> "str | None":
@@ -525,6 +547,9 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     stripped = (text or "").strip().strip("?.!")
     if not stripped:
         return "help", {}
+    connection = connection_intent(text)
+    if connection:
+        return "connection", connection
     extension = integrations.match(stripped)
     if extension:
         return "integration", {"name": extension[0], "payload": extension[1]}
@@ -598,7 +623,9 @@ async def on_message(message):
     intent, payload = chat_intent(remainder, get_pref(message.author.id, "repo", FLANX_DEFAULT_REPO))
     channel = message.channel
     try:
-        if intent == "search":
+        if intent == "connection":
+            await _handle_connection(message.author, channel, payload)
+        elif intent == "search":
             query = payload["query"]
             if not query:
                 await channel.send(
@@ -665,13 +692,13 @@ async def on_message(message):
                 await channel.send(f"🧠 **Brain memory for `{repo}`**\n```\n{clip(memory, 1800)}\n```")
         elif intent == "general":
             async with channel.typing():
-                task = Task.new("General chat response", "general_chat",
+                task = Task.new(f"General chat response via {model_router.route_description()}", "general_chat",
                                 permitted_tools={"model.reply"}, timeout_seconds=120)
                 outcome = await chat_orchestrator.run(task, payload["prompt"])
             if outcome.task.status == Status.COMPLETED:
                 await channel.send(clip(outcome.result, 1900))
             else:
-                await channel.send("⚠️ Max could not complete that request. Please try again.")
+                await channel.send(clip(outcome.error or "Max could not complete that request.", 1900))
         elif intent == "fix":
             repo, file_path, goal = payload["repo"], payload["file"], payload["goal"]
             missing = []
@@ -697,7 +724,8 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
+async def generate_assistant_reply(prompt: str, task: str = "general",
+                                   *, raise_on_error: bool = False) -> str:
     """Answer Discord questions through the shared privacy-aware model router."""
     try:
         reply = await model_router.generate(
@@ -716,6 +744,8 @@ async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
             task=task, data_class="private_repo", max_tokens=700,
         )
     except ModelError as exc:
+        if raise_on_error:
+            raise
         return str(exc)
     if reply.prompt_tokens is not None or reply.completion_tokens is not None:
         record_llm_usage(reply.model, reply)
@@ -723,7 +753,10 @@ async def generate_assistant_reply(prompt: str, task: str = "general") -> str:
 
 
 async def _general_chat_handler(task: Task, prompt: str) -> str:
-    return await generate_assistant_reply(prompt, task="general")
+    try:
+        return await generate_assistant_reply(prompt, task="general", raise_on_error=True)
+    except ModelError as exc:
+        raise TaskFailure("model_" + exc.code, str(exc)) from None
 
 
 chat_orchestrator = Orchestrator(store_path=TASK_DB)
@@ -877,7 +910,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
         validation = None
         raw_patch = ""
         retry_feedback = ""
-        model, temperature = model_router.selected_model("coding"), 0.1
+        model, temperature = None, 0.1
         for attempt in range(1, FIX_ATTEMPTS + 1):
             if attempt == 1:
                 await ctx.send("🧠 Composing the patch from memory + web intel + sandbox trace...")
@@ -1074,6 +1107,109 @@ class ExternalApprovalView(discord.ui.View):
 
 def _external_admin(ctx) -> bool:
     return ctx.author.id in publish_config.approver_ids
+
+
+_CONNECTION_ERRORS = {
+    "invalid_toolkit": "Use a valid toolkit name, such as `github` or `googlecalendar`.",
+    "auth_config_missing": "This app has no auth config in the `connections` section of MAX_COMPOSIO_POLICY_FILE.",
+    "auth_config_mismatch": "The configured auth config belongs to a different toolkit. Check the policy file.",
+    "already_connected": "This app already has an active connection for your account.",
+    "connection_pending": "A connection is already pending. Use `!max_connection_status <toolkit>`; start a new link after it expires.",
+    "ownership_mismatch": "That connection does not belong to your Discord account.",
+    "toolkit_disabled": "This toolkit is disabled by the Composio policy.",
+    "authentication": "Composio rejected COMPOSIO_API_KEY. Check the project key privately.",
+    "not_found": "The connection or auth config was not found. The link may have expired.",
+    "rate_limited": "Composio is rate limiting requests. Try again later.",
+    "timeout": "Composio did not respond in time. Check connection status before retrying.",
+    "service_error": "Composio is unavailable. Try again later.",
+    "invalid_response": "Composio returned an incomplete connection response; no account was confirmed.",
+}
+
+
+async def _handle_connection(author, channel, request: dict) -> None:
+    """Handle deterministic account management; all account details go by DM."""
+    if author.id not in publish_config.approver_ids:
+        await channel.send("Connection management is restricted to authorized owners.")
+        return
+    if composio_adapter is None or composio_adapter.policy.emergency_off:
+        await channel.send(
+            "Composio connections are disabled. Configure COMPOSIO_API_KEY, "
+            "MAX_COMPOSIO_POLICY_FILE with `connections`, MAX_COMPOSIO_ENABLED=true, "
+            "and MAX_EXTERNAL_ACTIONS_DISABLED=false."
+        )
+        return
+    try:
+        operation, target = request["operation"], request.get("toolkit", "")
+        if operation == "connect":
+            result = await composio_adapter.initiate_connection(target, author.id)
+            scopes = ", ".join(result["scopes"]) if result["scopes"] else "not exposed by the auth config"
+            await author.send(
+                f"Connect `{result['toolkit']}` using this private Composio link: <{result['url']}>\n"
+                f"Requested scopes: {scopes}. Connection ID: `{result['id']}`. "
+                "After completing consent, use `!max_connection_status " + result["id"] + "` in DM. "
+                "This does not enable or execute actions.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        elif operation == "list":
+            accounts = await composio_adapter.list_connections(author.id)
+            lines = [f"`{item['toolkit']}` `{item['id']}`: {item['status']}"
+                     for item in accounts]
+            await author.send("Your Composio connections:\n" + ("\n".join(lines) if lines else "None."),
+                              allowed_mentions=discord.AllowedMentions.none())
+        else:
+            if target.startswith("ca_"):
+                item = await composio_adapter.connection_status(target, author.id)
+            else:
+                name = target.lower().replace(" ", "")
+                candidates = [item for item in await composio_adapter.list_connections(author.id)
+                              if item["toolkit"] == name]
+                if len(candidates) != 1:
+                    await author.send(
+                        "No unique connection found. Use `!max_connections` and specify its connection ID.",
+                        allowed_mentions=discord.AllowedMentions.none())
+                    return
+                item = candidates[0]
+            if operation == "disconnect":
+                removed = await composio_adapter.disconnect_connection(item["id"], author.id)
+                await author.send(
+                    f"Deleted Composio connection `{removed['id']}` for `{removed['toolkit']}`. "
+                    "Check the provider's connected-app settings if upstream token revocation is required.",
+                    allowed_mentions=discord.AllowedMentions.none())
+            else:
+                item = await composio_adapter.connection_status(item["id"], author.id)
+                scopes = ", ".join(item["scopes"]) if item["scopes"] else "not exposed by Composio"
+                categories = ", ".join(item["action_categories"]) if item["action_categories"] else "none enabled"
+                await author.send(
+                    f"`{item['toolkit']}` (`{item['id']}`): {item['status']}. "
+                    f"Requested permissions: {scopes}. Allowed action categories: {categories}. "
+                    "A connection does not authorize an individual action.",
+                    allowed_mentions=discord.AllowedMentions.none())
+        if getattr(channel, "guild", None) is not None:
+            await channel.send("Connection details were sent by DM.")
+    except IntegrationError as exc:
+        await channel.send(_CONNECTION_ERRORS.get(exc.code, f"Connection request stopped: {exc.code}."))
+    except discord.HTTPException:
+        await channel.send("I could not send a private DM. Enable DMs and check connection status before retrying.")
+
+
+@bot.command(name="max_connect")
+async def max_connect(ctx, *, toolkit: str):
+    await _handle_connection(ctx.author, ctx.channel, {"operation": "connect", "toolkit": toolkit})
+
+
+@bot.command(name="max_connections")
+async def max_connections(ctx):
+    await _handle_connection(ctx.author, ctx.channel, {"operation": "list"})
+
+
+@bot.command(name="max_connection_status")
+async def max_connection_status(ctx, *, toolkit_or_id: str):
+    await _handle_connection(ctx.author, ctx.channel, {"operation": "status", "toolkit": toolkit_or_id})
+
+
+@bot.command(name="max_disconnect")
+async def max_disconnect(ctx, *, toolkit_or_id: str):
+    await _handle_connection(ctx.author, ctx.channel, {"operation": "disconnect", "toolkit": toolkit_or_id})
 
 
 def _memory_store() -> MemoryStore:

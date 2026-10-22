@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 
 class IntegrationError(RuntimeError):
@@ -36,6 +37,39 @@ _READ_VERBS = {"GET", "LIST", "SEARCH", "FETCH", "READ", "RETRIEVE"}
 _MUTATION_VERBS = {"DELETE", "REMOVE", "SEND", "POST", "PUBLISH", "CREATE", "UPDATE",
                    "EDIT", "PATCH", "PUT", "MERGE", "DEPLOY", "PAY", "PURCHASE",
                    "REVOKE", "GRANT", "TRANSFER", "INVITE", "ADD"}
+_TOOLKIT = re.compile(r"[a-z][a-z0-9_]{1,63}\Z")
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{3,120}\Z")
+
+
+def _user_id(requester_id: int | str) -> str:
+    """A Discord ID is the only source of Composio connection ownership."""
+    value = str(requester_id)
+    if not value.isdecimal() or int(value) <= 0:
+        raise IntegrationError("invalid_requester")
+    return f"max-discord-{int(value)}"
+
+
+def _toolkit_name(value: str) -> str:
+    name = (value or "").strip().lower().replace(" ", "")
+    if not _TOOLKIT.fullmatch(name):
+        raise IntegrationError("invalid_toolkit")
+    return name
+
+
+def _safe_scopes(value: Any) -> list[str]:
+    """Expose only scope identifiers, never provider credential fields."""
+    candidate = _data(value)
+    for field in ("scopes", "requested_scopes"):
+        scopes = candidate.get(field)
+        if isinstance(scopes, list):
+            return [scope for scope in scopes[:30] if isinstance(scope, str)
+                    and len(scope) <= 180 and re.fullmatch(r"[A-Za-z0-9:/. _-]+", scope)]
+    for field in ("auth_config", "auth_config_details"):
+        if candidate.get(field) is not None:
+            result = _safe_scopes(candidate[field])
+            if result:
+                return result
+    return []
 
 
 @dataclass(frozen=True)
@@ -62,6 +96,14 @@ class CapabilityPolicy:
         self.emergency_off = emergency_off
         self.disabled_integrations = set(document.get("disabled_integrations", []))
         self.disabled_actions = set(document.get("disabled_actions", []))
+        configured = document.get("connections", {})
+        if not isinstance(configured, dict) or any(
+            not isinstance(name, str) or not _TOOLKIT.fullmatch(name)
+            or not isinstance(auth_id, str) or not _IDENTIFIER.fullmatch(auth_id)
+            for name, auth_id in configured.items()
+        ):
+            raise ValueError("Invalid connection policy")
+        self.connections = dict(configured)
         self.actions: dict[tuple[str, str], Action] = {}
         for entry in document.get("actions", []):
             if not isinstance(entry, dict) or set(entry) != {
@@ -183,6 +225,99 @@ class ComposioAdapter:
             self._client = Composio(api_key=self._api_key)
         return self._client
 
+    async def _call(self, method, *args, **kwargs):
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(method, *args, **kwargs), self.timeout)
+        except asyncio.TimeoutError:
+            raise IntegrationError("timeout") from None
+        except Exception as exc:
+            raise self._classify(exc) from None
+
+    def _connection_policy(self, toolkit: str) -> tuple[str, str]:
+        name = _toolkit_name(toolkit)
+        if name in self.policy.disabled_integrations:
+            raise IntegrationError("toolkit_disabled")
+        auth_id = self.policy.connections.get(name)
+        if not auth_id:
+            raise IntegrationError("auth_config_missing")
+        return name, auth_id
+
+    def _account_summary(self, account: Any, user_id: str) -> dict:
+        entry = _data(account)
+        toolkit = _data(entry.get("toolkit")).get("slug")
+        account_id = entry.get("id")
+        if (entry.get("user_id") != user_id or not isinstance(toolkit, str)
+                or not _TOOLKIT.fullmatch(toolkit) or not isinstance(account_id, str)
+                or not _IDENTIFIER.fullmatch(account_id)):
+            raise IntegrationError("ownership_mismatch")
+        categories = set()
+        for action in self.policy.actions.values():
+            if action.account_id == account_id and action.toolkit == toolkit:
+                try:
+                    self.policy.decide(account_id, action.slug)
+                except IntegrationError:
+                    continue
+                categories.add(action.category)
+        return {"id": account_id, "toolkit": toolkit,
+                "status": str(entry.get("status") or "UNKNOWN").upper(),
+                "scopes": _safe_scopes(entry), "action_categories": sorted(categories),
+                "actions_enabled": bool(categories)}
+
+    async def list_connections(self, requester_id: int | str) -> list[dict]:
+        user_id = _user_id(requester_id)
+        accounts = await self._call(self._sdk().connected_accounts.list, user_ids=[user_id])
+        items = _data(accounts).get("items", [])
+        if not isinstance(items, list):
+            raise IntegrationError("invalid_response")
+        return [self._account_summary(item, user_id) for item in items[:50]]
+
+    async def initiate_connection(self, toolkit: str, requester_id: int | str) -> dict:
+        """Return a private Connect Link; callers must deliver it only by DM."""
+        name, auth_id = self._connection_policy(toolkit)
+        user_id = _user_id(requester_id)
+        client = self._sdk()
+        configured = _data(await self._call(client.auth_configs.get, auth_id))
+        actual_toolkit = _data(configured.get("toolkit")).get("slug")
+        if actual_toolkit != name:
+            raise IntegrationError("auth_config_mismatch")
+        for account in await self.list_connections(requester_id):
+            if account["toolkit"] == name and account["status"] == "ACTIVE":
+                raise IntegrationError("already_connected")
+            if account["toolkit"] == name and account["status"] in {"INITIALIZING", "INITIATED"}:
+                raise IntegrationError("connection_pending")
+        request = _data(await self._call(client.connected_accounts.link, user_id, auth_id))
+        link = request.get("redirect_url")
+        account_id = request.get("id")
+        try:
+            parsed = urlsplit(link)
+            valid_link = parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+        except (TypeError, ValueError):
+            valid_link = False
+        if not valid_link or not isinstance(account_id, str) or not _IDENTIFIER.fullmatch(account_id):
+            raise IntegrationError("invalid_response")
+        return {"id": account_id, "toolkit": name, "url": link,
+                "scopes": _safe_scopes(configured), "status": "INITIATED"}
+
+    async def connection_status(self, account_id: str, requester_id: int | str) -> dict:
+        user_id = _user_id(requester_id)
+        if not isinstance(account_id, str) or not _IDENTIFIER.fullmatch(account_id):
+            raise IntegrationError("invalid_account")
+        account = await self._call(self._sdk().connected_accounts.get, account_id)
+        summary = self._account_summary(account, user_id)
+        auth_id = self.policy.connections.get(summary["toolkit"])
+        if not auth_id:
+            raise IntegrationError("toolkit_unconfigured")
+        configured = _data(await self._call(self._sdk().auth_configs.get, auth_id))
+        if _data(configured.get("toolkit")).get("slug") != summary["toolkit"]:
+            raise IntegrationError("auth_config_mismatch")
+        summary["scopes"] = _safe_scopes(configured) or summary["scopes"]
+        return summary
+
+    async def disconnect_connection(self, account_id: str, requester_id: int | str) -> dict:
+        summary = await self.connection_status(account_id, requester_id)
+        await self._call(self._sdk().connected_accounts.delete, account_id)
+        return {**summary, "status": "DELETED"}
+
     async def discover(self, account_id: str, slug: str) -> dict:
         action, tool = self.policy.decide(account_id, slug)
         client = self._sdk()
@@ -212,11 +347,21 @@ class ComposioAdapter:
 
     @staticmethod
     def _classify(exc: Exception) -> IntegrationError:
+        if "MultipleConnectedAccounts" in type(exc).__name__:
+            return IntegrationError("already_connected")
+        if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
+            return IntegrationError("timeout")
         status = getattr(exc, "status_code", getattr(exc, "status", None))
         if status == 429:
             return IntegrationError("rate_limited")
-        if status in (401, 403):
-            return IntegrationError("connection_expired")
+        if status == 401:
+            return IntegrationError("authentication")
+        if status == 403:
+            return IntegrationError("permission_denied")
+        if status == 404:
+            return IntegrationError("not_found")
+        if status == 409:
+            return IntegrationError("conflict")
         return IntegrationError("service_error")
 
     async def execute(self, account_id: str, slug: str, arguments: dict) -> tuple[dict, Any]:

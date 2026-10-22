@@ -2,6 +2,10 @@
   "autonomy": "observe",
   "disabled_integrations": [],
   "disabled_actions": [],
+  "connections": {
+    "github": "replace-with-github-auth-config-id",
+    "googlecalendar": "replace-with-google-calendar-auth-config-id"
+  },
   "actions": [
     {
       "slug": "GITHUB_GET_REPOS",

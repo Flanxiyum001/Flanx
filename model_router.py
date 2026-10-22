@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ TASK_ENV_VARS: Mapping[str, str] = {
 }
 ROLE_TASKS = {"planner": "general", "coder": "coding", "reviewer": "review", "tester": "review"}
 PRIVATE_DATA = frozenset({"private_repo", "source", "memory"})
+LOG = logging.getLogger(__name__)
 DEFAULT_LOCAL_MODEL = "qwen3:8b"
 DEFAULT_VISION_MODEL = "qwen3-vl:8b"
 _LABELED_SECRET = re.compile(
@@ -93,6 +95,7 @@ class RouterConfig:
     context_tokens: int
     input_chars: int
     keep_alive: str
+    auto_cloud_fallback: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RouterConfig:
@@ -109,7 +112,7 @@ class RouterConfig:
                 ) if _enabled(env, variable)
             ),
             local_url=(env.get("MAX_OLLAMA_BASE_URL") or env.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/"),
-            cloud_url=env.get("AI_BASE_URL", "https://freellmapi.co/v1"),
+            cloud_url=env.get("AI_BASE_URL", "").rstrip("/"),
             cloud_key=env.get("AI_API_KEY", ""),
             local_model=env.get("MAX_LOCAL_MODEL", DEFAULT_LOCAL_MODEL).strip() or DEFAULT_LOCAL_MODEL,
             vision_model=env.get("MAX_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL,
@@ -119,6 +122,7 @@ class RouterConfig:
             context_tokens=_positive_int(env, "MAX_MODEL_CONTEXT_TOKENS", 8192),
             input_chars=_positive_int(env, "MAX_MODEL_INPUT_CHARS", 50000),
             keep_alive=env.get("MAX_OLLAMA_KEEP_ALIVE", "0"),
+            auto_cloud_fallback=_enabled(env, "MAX_AUTO_CLOUD_FALLBACK"),
         )
 
 
@@ -136,6 +140,7 @@ class ModelReply:
     model: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    provider: str = "unknown"
 
 
 class ModelRouter:
@@ -149,7 +154,7 @@ class ModelRouter:
         self._cloud_slots = asyncio.Semaphore(self.config.cloud_concurrency)
 
     def selected_model(self, task: str = "general", *, role: str | None = None,
-                       override: str | None = None) -> str:
+                       override: str | None = None, provider: str = "local") -> str:
         if role:
             if role not in ROLE_TASKS:
                 raise ModelError("configuration", "Unknown specialist role.")
@@ -159,10 +164,43 @@ class ModelRouter:
             task = ROLE_TASKS[role]
         if task == "vision":
             return override or self.env.get("MAX_MODEL_VISION", "").strip() or self.config.vision_model
-        fallback = self.config.local_model
+        if provider in {"freellm", "cloud"}:
+            fallback = self.env.get("AI_MODEL", "").strip()
+        elif self.config.provider == "local":
+            fallback = self.env.get("AI_MODEL", "").strip() or self.config.local_model
+        else:
+            fallback = self.config.local_model
         return route_model(task, override=override,
-                           fallback=self.env.get("AI_MODEL", "").strip() or fallback,
+                           fallback=fallback,
                            environ=self.env)
+
+    def route_description(self) -> str:
+        """Safe provider selection label for task metadata and diagnostics."""
+        target = self.config.provider
+        if target == "auto":
+            return "auto (Ollama first; FreeLLM fallback configured)" if self.config.auto_cloud_fallback else "auto (Ollama only)"
+        return "FreeLLM" if target in {"freellm", "cloud"} else "Ollama"
+
+    def _cloud_permission(self, classes: tuple[str, ...]) -> None:
+        cfg = self.config
+        if cfg.policy != "cloud_allowed":
+            raise ModelError("provider_disabled", "FreeLLM is disabled by MAX_INFERENCE_POLICY; set cloud_allowed to enable it.")
+        if any(item in PRIVATE_DATA and not cfg.allow_cloud_private
+               and item not in cfg.allowed_private_classes for item in classes):
+            raise ModelError("privacy_blocked", "Privacy policy blocks FreeLLM for this data class. Use Ollama or explicitly approve this class.")
+
+    def _cloud_configuration(self) -> None:
+        cfg = self.config
+        if not cfg.cloud_key and self.cloud_client is None:
+            raise ModelError("missing_credentials", "FreeLLM requires AI_API_KEY.")
+        try:
+            endpoint = urlsplit(cfg.cloud_url)
+            valid = endpoint.scheme in {"http", "https"} and bool(endpoint.hostname) and not (
+                endpoint.username or endpoint.password or endpoint.query or endpoint.fragment)
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ModelError("configuration", "FreeLLM requires AI_BASE_URL set to its HTTP(S) OpenAI-compatible API base URL without embedded credentials.")
 
     async def generate(self, messages: list[dict[str, str]], *, task: str = "general",
                        role: str | None = None, model: str | None = None,
@@ -171,8 +209,10 @@ class ModelRouter:
                        temperature: float | None = None,
                        max_tokens: int | None = None) -> ModelReply:
         cfg = self.config
-        target = (provider or cfg.provider).lower()
-        if target not in ("local", "cloud") or cfg.policy not in ("local_only", "cloud_allowed"):
+        target = (provider or cfg.provider).strip().lower()
+        if target == "cloud":
+            target = "freellm"  # compatibility with the existing configuration
+        if target not in ("local", "freellm", "auto") or cfg.policy not in ("local_only", "cloud_allowed"):
             raise ModelError("configuration", "Inference provider or privacy policy is invalid.")
         classes = (data_class,) if isinstance(data_class, str) else data_class
         if not isinstance(classes, tuple) or not classes or any(
@@ -180,15 +220,7 @@ class ModelRouter:
             for item in classes
         ):
             raise ModelError("configuration", "Unknown inference data class.")
-        if target == "cloud":
-            if cfg.policy != "cloud_allowed" or (
-                any(item in PRIVATE_DATA and not cfg.allow_cloud_private
-                    and item not in cfg.allowed_private_classes for item in classes)
-            ):
-                raise ModelError("privacy_blocked", "Privacy policy blocks cloud inference for this request. Select a local model or explicitly enable cloud use for this data class.")
-            if not cfg.cloud_key and self.cloud_client is None:
-                raise ModelError("configuration", "Cloud inference requires AI_API_KEY.")
-        else:
+        if target in {"local", "auto"}:
             try:
                 endpoint = urlsplit(cfg.local_url)
                 is_local = (
@@ -209,12 +241,42 @@ class ModelRouter:
             raise ModelError("configuration", "Invalid model messages.")
         if sum(len(m["content"]) for m in messages) > cfg.input_chars:
             raise ModelError("context_limit", "The request exceeds MAX_MODEL_INPUT_CHARS. Shorten its context.")
-        chosen = self.selected_model(task, role=role, override=model)
-        if target == "local":
+        if target == "freellm":
+            self._cloud_permission(classes)
+            self._cloud_configuration()
+            chosen = self.selected_model(task, role=role, override=model, provider="freellm")
+            if not chosen:
+                raise ModelError("configuration", "FreeLLM requires AI_MODEL or a task-specific MAX_MODEL_* identifier.")
+            LOG.info("model route provider=freellm task=%s data_classes=%s",
+                     task if task in TASK_ENV_VARS else "other", ",".join(classes))
+            async with self._cloud_slots:
+                return await self._cloud(_redact_cloud_messages(messages), chosen, temperature, max_tokens)
+        local_model = self.selected_model(task, role=role, override=model, provider="local")
+        LOG.info("model route provider=ollama task=%s data_classes=%s",
+                 task if task in TASK_ENV_VARS else "other", ",".join(classes))
+        try:
             async with self._local_slots:
-                return await self._local(messages, chosen, temperature, max_tokens)
-        async with self._cloud_slots:
-            return await self._cloud(_redact_cloud_messages(messages), chosen, temperature, max_tokens)
+                return await self._local(messages, local_model, temperature, max_tokens)
+        except ModelError as local_error:
+            if target != "auto" or not cfg.auto_cloud_fallback or local_error.code not in {
+                "missing_model", "unavailable", "timeout", "malformed_response"
+            }:
+                raise
+            try:
+                self._cloud_permission(classes)
+            except ModelError as blocked:
+                raise ModelError(local_error.code, f"{local_error} FreeLLM fallback blocked: {blocked}") from None
+            try:
+                self._cloud_configuration()
+                cloud_model = self.selected_model(task, role=role, override=model, provider="freellm")
+                if not cloud_model:
+                    raise ModelError("configuration", "FreeLLM requires AI_MODEL or a task-specific MAX_MODEL_* identifier.")
+                LOG.info("model route provider=freellm fallback_from=ollama task=%s data_classes=%s",
+                         task if task in TASK_ENV_VARS else "other", ",".join(classes))
+                async with self._cloud_slots:
+                    return await self._cloud(_redact_cloud_messages(messages), cloud_model, temperature, max_tokens)
+            except ModelError as cloud_error:
+                raise ModelError("providers_failed", f"Ollama: {local_error} FreeLLM: {cloud_error}") from None
 
     async def _local(self, messages, model, temperature, max_tokens) -> ModelReply:
         cfg = self.config
@@ -248,7 +310,7 @@ class ModelRouter:
             if not isinstance(content, str) or not content.strip() or data.get("done") is not True:
                 raise ValueError("invalid response")
             return ModelReply(content.strip(), str(data.get("model") or model),
-                              _count(data.get("prompt_eval_count")), _count(data.get("eval_count")))
+                              _count(data.get("prompt_eval_count")), _count(data.get("eval_count")), "ollama")
         except ModelError:
             raise
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError):
@@ -279,20 +341,22 @@ class ModelRouter:
             usage = getattr(response, "usage", None)
             return ModelReply(content.strip(), getattr(response, "model", None) or model,
                               _count(getattr(usage, "prompt_tokens", None)),
-                              _count(getattr(usage, "completion_tokens", None)))
+                              _count(getattr(usage, "completion_tokens", None)), "freellm")
         except asyncio.TimeoutError:
-            raise ModelError("timeout", "Cloud model request timed out; the provider may still be finishing it.") from None
+            raise ModelError("timeout", "FreeLLM request timed out; the provider may still be finishing it.") from None
         except (ValueError, IndexError, TypeError, AttributeError):
-            raise ModelError("malformed_response", "The cloud model returned an invalid response.") from None
+            raise ModelError("malformed_response", "FreeLLM returned an invalid chat completion.") from None
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             if status == 429:
-                raise ModelError("rate_limited", "Cloud model rate limit reached. Try later or select local inference.") from None
-            if status == 400 and "context" in str(exc).lower():
-                raise ModelError("context_limit", "The cloud model rejected the request context.") from None
+                raise ModelError("rate_limited", "FreeLLM rate limit reached. Retry later or select Ollama.") from None
+            if status in (401, 403):
+                raise ModelError("authentication", "FreeLLM rejected AI_API_KEY or access to the configured model.") from None
+            if status in (400, 404, 405, 422):
+                raise ModelError("rejected", f"FreeLLM rejected the request (HTTP {status}); check AI_BASE_URL and AI_MODEL.") from None
             if "timeout" in type(exc).__name__.lower():
-                raise ModelError("timeout", "Cloud model request timed out.") from None
-            raise ModelError("unavailable", "Cloud model request failed. Select local inference or retry later.") from None
+                raise ModelError("timeout", "FreeLLM request timed out.") from None
+            raise ModelError("unavailable", "FreeLLM connection failed or its endpoint is unavailable; check AI_BASE_URL.") from None
         finally:
             if owned_client is not None:
                 try:

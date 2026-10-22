@@ -19,15 +19,18 @@ and tester do not make model calls by default.
 `MAX_MODEL_TESTER`. `MAX_MODEL_VISION` or `MAX_VISION_MODEL` selects a
 vision model explicitly. Existing `AI_MODEL` and `AI_RETRY_MODEL` values
 remain model ID overrides. Configure IDs installed on your Ollama server when
-using local inference.
+using local inference. With `auto` provider selection, Ollama uses its local
+model setting; FreeLLM uses `AI_MODEL` or a task override.
 
 ## Privacy and cloud
 
 `MAX_INFERENCE_PROVIDER=local` and `MAX_INFERENCE_POLICY=local_only` are
-the defaults. To explicitly use FreeLLMAPI or another OpenAI-compatible gateway,
-set `MAX_INFERENCE_PROVIDER=cloud`, `MAX_INFERENCE_POLICY=cloud_allowed`,
-`AI_BASE_URL`, `AI_API_KEY`, and a gateway-supported `AI_MODEL` or task
-override. The original cloud environment variables retain their meanings.
+the defaults. To explicitly use the Railway-hosted FreeLLM gateway, set
+`MAX_INFERENCE_PROVIDER=freellm`, `MAX_INFERENCE_POLICY=cloud_allowed`,
+`AI_BASE_URL` to that service's OpenAI-compatible base URL, `AI_API_KEY`,
+and `AI_MODEL=auto` if that gateway supports `auto`. `cloud` remains a
+compatibility alias. No public URL is assumed. Leaving the provider unset
+selects Ollama even when the FreeLLM URL and model are present.
 
 Repository source, memory, and Discord chat content are treated as private.
 Cloud use for them also requires an explicit data-class opt-in.
@@ -38,8 +41,10 @@ three classes. Each setting still requires `MAX_INFERENCE_POLICY=cloud_allowed`
 and an explicitly selected cloud provider.
 The repair prompt contains both source and memory, so its cloud route requires
 both narrow permissions or the broad private-context permission.
-Blocked cloud requests explain the policy and offer a local route. Local errors
-never authorize a cloud fallback. The separate
+Blocked FreeLLM requests explain the policy and offer a local route. In
+`MAX_INFERENCE_PROVIDER=auto`, a local failure can trigger FreeLLM only when
+`MAX_AUTO_CLOUD_FALLBACK=true` and all policy and data-class gates permit it.
+The separate
 `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT=true` setting enables the remote repair
 sandbox and web workflow; it does not permit cloud model inference.
 

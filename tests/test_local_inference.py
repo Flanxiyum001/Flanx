@@ -118,7 +118,7 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
                              cloud_client=cloud)
         with self.assertRaises(ModelError) as caught:
             await router.generate(MESSAGES, provider="cloud", data_class="general")
-        self.assertEqual(caught.exception.code, "privacy_blocked")
+        self.assertEqual(caught.exception.code, "provider_disabled")
         self.assertNotIn("secret", str(caught.exception))
         cloud.chat.completions.create.assert_not_called()
 
@@ -131,6 +131,7 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
         router = ModelRouter(environ={
             "MAX_INFERENCE_PROVIDER": "cloud", "MAX_INFERENCE_POLICY": "cloud_allowed",
             "MAX_ALLOW_CLOUD_PRIVATE_CONTEXT": "true", "AI_MODEL": "legacy-id",
+            "AI_BASE_URL": "https://freellm.example/v1",
         }, cloud_client=cloud)
         reply = await router.generate(MESSAGES, data_class="memory")
         self.assertEqual((reply.text, reply.model, reply.prompt_tokens),
@@ -143,7 +144,9 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
         create = AsyncMock(return_value=raw)
         cloud = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         router = ModelRouter(environ={"MAX_INFERENCE_POLICY": "cloud_allowed",
-                                      "MAX_ALLOW_CLOUD_SOURCE": "true"}, cloud_client=cloud)
+                                      "MAX_ALLOW_CLOUD_SOURCE": "true",
+                                      "AI_BASE_URL": "https://freellm.example/v1",
+                                      "AI_MODEL": "auto"}, cloud_client=cloud)
         await router.generate([{"role": "user", "content": "api_key=private-value, token sk-abcdefghijklmno"}],
                               provider="cloud", data_class="source")
         forwarded = create.call_args.kwargs["messages"][0]["content"]
@@ -158,6 +161,7 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
         router = ModelRouter(environ={
             "MAX_INFERENCE_POLICY": "cloud_allowed",
             "MAX_ALLOW_CLOUD_SOURCE": "true",
+            "AI_BASE_URL": "https://freellm.example/v1", "AI_MODEL": "auto",
         }, cloud_client=cloud)
         self.assertEqual((await router.generate(MESSAGES, provider="cloud",
                                                  data_class="source")).text, "allowed")
@@ -216,7 +220,8 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
             status_code = 429
         create = AsyncMock(side_effect=RateLimit("key=secret"))
         cloud = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-        router = ModelRouter(environ={"MAX_INFERENCE_POLICY": "cloud_allowed"}, cloud_client=cloud)
+        router = ModelRouter(environ={"MAX_INFERENCE_POLICY": "cloud_allowed",
+                                     "AI_BASE_URL": "https://freellm.example/v1", "AI_MODEL": "auto"}, cloud_client=cloud)
         with self.assertRaises(ModelError) as caught:
             await router.generate(MESSAGES, provider="cloud", data_class="general")
         self.assertEqual(caught.exception.code, "rate_limited")
@@ -232,7 +237,8 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_cloud_malformed_response_is_safe(self):
         create = AsyncMock(return_value=SimpleNamespace(choices=[]))
         cloud = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-        router = ModelRouter(environ={"MAX_INFERENCE_POLICY": "cloud_allowed"}, cloud_client=cloud)
+        router = ModelRouter(environ={"MAX_INFERENCE_POLICY": "cloud_allowed",
+                                     "AI_BASE_URL": "https://freellm.example/v1", "AI_MODEL": "auto"}, cloud_client=cloud)
         with self.assertRaises(ModelError) as caught:
             await router.generate(MESSAGES, provider="cloud", data_class="public")
         self.assertEqual(caught.exception.code, "malformed_response")
