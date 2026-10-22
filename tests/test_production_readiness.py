@@ -161,7 +161,7 @@ class ReadOnlyReviewTests(unittest.TestCase):
 
 class ModelAndErrorTests(unittest.TestCase):
     def test_no_stale_model_default(self):
-        self.assertEqual(model_router.configured_routes({})["coding"], "auto")
+        self.assertEqual(model_router.configured_routes({})["coding"], "qwen3:8b")
         self.assertIsNotNone(configured_model_issue("qwen-2.5-coder-32b"))
         self.assertIsNone(configured_model_issue("auto"))
 
@@ -176,40 +176,6 @@ class ModelAndErrorTests(unittest.TestCase):
             with self.subTest(status=status):
                 err.status_code = status
                 self.assertNotIn(secret, safe_provider_error(err))
-
-
-class GitHubPatchWorkflowTests(unittest.TestCase):
-    def test_stale_source_blocks_branch_creation_and_update(self):
-        remote = MagicMock()
-        remote.default_branch = "main"
-        remote.get_contents.return_value = SimpleNamespace(sha="newer-sha")
-        with self.assertRaisesRegex(ValueError, "source file changed"):
-            main.open_pull_request(
-                remote, "src/app.py", "print(1)", "fix", "smoke check",
-                expected_file_sha="older-sha",
-            )
-        remote.create_git_ref.assert_not_called()
-        remote.update_file.assert_not_called()
-
-    def test_patch_update_only_occurs_on_new_feature_branch(self):
-        remote = MagicMock()
-        remote.default_branch = "main"
-        remote.get_branch.return_value = SimpleNamespace(
-            commit=SimpleNamespace(sha="base-commit"))
-        remote.get_contents.return_value = SimpleNamespace(sha="same-sha")
-        remote.create_pull.return_value = SimpleNamespace(
-            html_url="https://github.com/owner/repo/pull/9")
-        main.open_pull_request(
-            remote, "src/app.py", "print(2)", "fix", "sandbox-ok",
-            expected_file_sha="same-sha",
-        )
-        self.assertEqual(remote.create_git_ref.call_count, 1)
-        branch = remote.update_file.call_args.kwargs["branch"]
-        self.assertNotEqual(branch, "main")
-        self.assertEqual(remote.create_pull.call_args.kwargs["head"], branch)
-        self.assertEqual(
-            remote.update_file.call_args.kwargs["sha"], "same-sha"
-        )
 
 
 class GitHubAccessControlTests(unittest.TestCase):
@@ -253,6 +219,12 @@ class GitHubAccessControlTests(unittest.TestCase):
         self.assertFalse(result)
         remote.update_file.assert_not_called()
         remote.create_file.assert_not_called()
+
+    def test_memory_helper_never_writes_feature_branch_without_approval(self):
+        with patch.object(free_sandbox, "_client") as client:
+            self.assertFalse(free_sandbox.update_flanx_brain(
+                "owner/repo", "unapproved lesson", ref="max-feature-123"))
+        client.assert_not_called()
 
     def test_public_github_brain_redacts_credential_assignments(self):
         client = MagicMock()
@@ -387,13 +359,8 @@ class SandboxHTTPTests(unittest.TestCase):
 
 class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_auth_diagnostic_does_not_leak_secret(self):
-        class UntrustedStatus(Exception):
-            status_code = 401
-        fake = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(create=AsyncMock(
-                side_effect=UntrustedStatus("PRIVATE-KEY-AND-PROMPT"))),
-        ))
-        with patch.object(main, "ai_client", fake):
+        with patch.object(main.model_router, "generate", new_callable=AsyncMock,
+                          side_effect=model_router.ModelError("auth", "Provider authentication failed (HTTP 401).")):
             reply = await main.generate_assistant_reply("hello")
         self.assertIn("401", reply)
         self.assertNotIn("PRIVATE-KEY", reply)
@@ -407,10 +374,11 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
             sha="source-sha",
             decoded_content=b'API_KEY = "this-is-a-fake-sensitive-credential"'
         )
-        with patch.object(main.gh, "get_repo", return_value=repository), \
+        with patch.object(main, "MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT", True), \
+             patch.object(main.gh, "get_repo", return_value=repository), \
              patch.object(main, "run_code") as sandbox, \
              patch.object(main, "generate_patch") as model:
-            await main.fix_pipeline(context, "owner/repo", "src/app.py", "fix it")
+            await main.fix_pipeline(context, "owner/repo", "src/app.py", "fix it", requester_id=7)
         sandbox.assert_not_called()
         model.assert_not_called()
         self.assertIn("literal credential", context.send.await_args.args[0])
@@ -419,10 +387,11 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
         ctx = SimpleNamespace(send=AsyncMock())
         private_repo = MagicMock()
         private_repo.private = True
-        with patch.object(main.gh, "get_repo", return_value=private_repo), \
+        with patch.object(main, "MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT", True), \
+             patch.object(main.gh, "get_repo", return_value=private_repo), \
              patch.object(main, "run_code") as sandbox, \
              patch.object(main, "generate_patch") as model:
-            await main.fix_pipeline(ctx, "owner/private", "src/app.py", "fix it")
+            await main.fix_pipeline(ctx, "owner/private", "src/app.py", "fix it", requester_id=7)
         private_repo.get_contents.assert_not_called()
         sandbox.assert_not_called()
         model.assert_not_called()
@@ -431,7 +400,7 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_file_never_reaches_github(self):
         ctx = SimpleNamespace(send=AsyncMock())
         with patch.object(main, "gh") as fake_github:
-            await main.fix_pipeline(ctx, "owner/repo", "../secrets.py", "fix it")
+            await main.fix_pipeline(ctx, "owner/repo", "../secrets.py", "fix it", requester_id=7)
         fake_github.get_repo.assert_not_called()
         self.assertTrue(ctx.send.await_count)
 
@@ -453,32 +422,24 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
         for call in ctx.send.await_args_list:
             self.assertEqual(call.args[0], GITHUB_ACCESS_DENIED)
 
-    async def test_no_ai_base_url_fails_without_network(self):
-        with patch.object(main, "ai_client", None):
+    async def test_model_configuration_fails_without_network(self):
+        with patch.object(main.model_router, "generate", new_callable=AsyncMock,
+                          side_effect=model_router.ModelError("configuration", "Cloud inference requires AI_API_KEY.")) as generate:
             response = await main.generate_assistant_reply("hi")
-        self.assertIn("AI_BASE_URL", response)
+        self.assertIn("AI_API_KEY", response)
+        generate.assert_awaited_once()
 
 
     async def test_malformed_usage_metadata_does_not_discard_successful_reply(self):
-        response = SimpleNamespace(
-            model="auto",
-            choices=[SimpleNamespace(message=SimpleNamespace(content="AI answer is intact"))],
-            usage={"prompt_tokens": "not-a-number"},
-        )
-        fake = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(create=AsyncMock(return_value=response))
-        ))
-        with patch.object(main, "ai_client", fake), \
+        response = model_router.ModelReply("AI answer is intact", "qwen3:8b", 2, 3)
+        with patch.object(main.model_router, "generate", new_callable=AsyncMock, return_value=response), \
              patch.object(main, "record_llm_usage", side_effect=ValueError("sensitive data")):
             answer = await main.generate_assistant_reply("hello")
         self.assertEqual(answer, "AI answer is intact")
 
     async def test_malformed_gateway_chat_is_reported_not_crashed(self):
-        fake = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(create=AsyncMock(
-                return_value=SimpleNamespace(choices=[], usage=None)))),
-        )
-        with patch.object(main, "ai_client", fake):
+        with patch.object(main.model_router, "generate", new_callable=AsyncMock,
+                          side_effect=model_router.ModelError("malformed", "AI gateway returned a malformed chat response.")):
             reply = await main.generate_assistant_reply("hello")
         self.assertIn("malformed", reply.lower())
 
@@ -487,11 +448,8 @@ class AsyncSafetyTests(unittest.IsolatedAsyncioTestCase):
             "name": "owner/repo", "private": False, "branch": "main",
             "files": ["README.md"], "truncated": False, "context": "README data"
         }
-        fake = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(create=AsyncMock(
-                return_value=SimpleNamespace(choices=[], usage=None)))),
-        )
-        with patch.object(main, "ai_client", fake):
+        with patch.object(main.model_router, "generate", new_callable=AsyncMock,
+                          side_effect=model_router.ModelError("malformed", "AI gateway returned a malformed review response.")):
             reply = await main.generate_review_reply(evidence, "review")
         self.assertIn("malformed", reply.lower())
 

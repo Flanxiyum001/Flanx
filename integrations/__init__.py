@@ -1,14 +1,14 @@
-"""Pluggable integrations for Flanx.
+"""Pluggable integrations for Max.
 
 Drop a new ``.py`` file into this package and it goes live with **no changes to
-``main.py``**: ``flanx integrations`` lists it, and any chat message its ``match()``
+``main.py``**: ``max integrations`` lists it, and any chat message its ``match()``
 claims gets routed to its ``handle()``.
 
 Contract for an integration module (copy ``_template.py`` and rename without the
 leading underscore):
 
     NAME: str                                  # short slug, e.g. "weather"
-    DESCRIPTION: str                           # one line for `flanx integrations`
+    DESCRIPTION: str                           # one line for `max integrations`
     USAGE: list[str]                           # example phrases
     def match(text: str) -> dict | None        # claim a message -> payload, else None
     async def handle(event: ChatEvent, payload: dict) -> str | None   # the reply

@@ -21,11 +21,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 import requests
-from github import Github, GithubException, UnknownObjectException
+from github import Github, UnknownObjectException
 from repo_review import _redact_review_excerpt
 
 SANDBOX_BASE_URL = os.getenv("ONLINE_COMPILER_BASE_URL", "https://api.onlinecompiler.io").rstrip("/")
@@ -40,7 +39,7 @@ MAX_CODE_BYTES = 100_000  # documented UTF-8 encoded-byte limit
 MAX_STDIN_BYTES = 100_000
 
 BRAIN_FILE = "brain_memory.txt"
-BRAIN_HEADER = "# Flanx Core Memory Bank"
+BRAIN_HEADER = "# Max Core Memory Bank"
 BRAIN_MAX_CHARS = 12_000  # keep the diary small enough to fit a single prompt
 
 CLIP_DEFAULT = 1500
@@ -265,56 +264,5 @@ def update_flanx_brain(
     ref: str = "main",
     max_retries: int = 3,
 ) -> bool:
-    """Append a timestamped lesson to ``brain_memory.txt`` on the target branch."""
-    if ref in {"main", "master"}:
-        print("⚠️ Refusing to commit brain memory directly to a default branch.")
-        return False
-    try:
-        repo = _client().get_repo(repo_name)
-    except Exception:
-        print("⚠️ Brain update warning (repository unavailable).")
-        return False
-    # A repository may name its protected default branch something other than
-    # main/master. Never bypass approval by writing directly to that branch.
-    if ref == repo.default_branch:
-        print("⚠️ Refusing to commit brain memory directly to the default branch.")
-        return False
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    entry = f"- [{stamp}] {new_insight}"
-
-    for attempt in range(max_retries):
-        try:
-            try:
-                file_obj = repo.get_contents(BRAIN_FILE, ref=ref)
-                current = file_obj.decoded_content.decode("utf-8", errors="replace")
-                sha: Optional[str] = file_obj.sha
-            except UnknownObjectException:
-                current, sha = f"{BRAIN_HEADER}\n", None
-
-            updated = _trim_brain(f"{current.rstrip()}\n{entry}\n")
-            if sha:
-                repo.update_file(
-                    BRAIN_FILE,
-                    "🤖 Flanx brain evolution matrix updated.",
-                    updated,
-                    sha,
-                    branch=ref,
-                )
-            else:
-                repo.create_file(
-                    BRAIN_FILE,
-                    "🤖 Flanx brain initialization.",
-                    updated,
-                    branch=ref,
-                )
-            print("🧠 Flanx wrote a lesson to its memory layer.")
-            return True
-        except GithubException as exc:
-            if exc.status == 409 and attempt < max_retries - 1:
-                continue  # concurrent write, refetch and retry
-            print(f"⚠️ Brain update failed (GitHub HTTP {exc.status}).")
-            return False
-        except Exception:
-            print("⚠️ Brain update failed.")
-            return False
+    """Remote memory writes are unavailable until covered by scoped approval."""
     return False

@@ -1,0 +1,17 @@
+{
+  "autonomy": "observe",
+  "disabled_integrations": [],
+  "disabled_actions": [],
+  "actions": [
+    {
+      "slug": "GITHUB_GET_REPOS",
+      "toolkit": "github",
+      "account_id": "replace-with-dedicated-connected-account-id",
+      "user_id": "replace-with-composio-user-id",
+      "version": "replace-with-discovered-tool-version",
+      "risk": "read",
+      "category": "github",
+      "max_calls": 2
+    }
+  ]
+}

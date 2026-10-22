@@ -4,7 +4,6 @@ flanx_usage.json
 flanx_usage.json.tmp
 flanx_prefs.json
 flanx_prefs.json.tmp
-
 # Local/production secrets and state must never enter commits
 .env
 .env.*
@@ -17,3 +16,4 @@ max_lessons.json
 *.db
 *.db-wal
 *.db-shm
+.max_state/

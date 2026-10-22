@@ -1,6 +1,6 @@
-"""Per-user companion preferences and notes for Flanx (persisted JSON).
+"""Per-user companion preferences and notes for Max (persisted JSON).
 
-Holds the personal-assistant side of Flanx: each Discord user's timezone and
+Holds the personal-assistant side of Max: each Discord user's timezone and
 their saved notes. State lives in ``flanx_prefs.json`` (git-ignored) with atomic
 writes and a lock, mirroring ``usage.py``. On ephemeral hosts point
 ``FLANX_PREFS_FILE`` at a persistent path to keep preferences across redeploys.

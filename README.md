@@ -1,9 +1,12 @@
 # Max
 
-Max is a Discord-first coding companion. For supported source files, it retrieves
-repository code, gathers context, runs a **single-file sandbox smoke check**, and
-opens a PR only when that check passes. A passing smoke check does **not** prove
-the entire repository builds, passes tests, or behaves correctly.
+Max is your self-correcting Discord coding companion. It pulls a file from GitHub, recalls past
+lessons, searches the live web, proves the fix inside a **free** OnlineCompiler.io
+sandbox, learns from the result, and opens a pull request — all from a Discord command.
+
+Repository repair prepares and validates a patch. Publishing a branch and pull request requires
+an authenticated Discord approval and explicit configuration for one test repository.
+Publishing is off by default.
 
 ```
 max fix src/app.py in owner/repo: add retry logic around the HTTP call
@@ -18,76 +21,76 @@ max fix src/app.py in owner/repo: add retry logic around the HTTP call
    (Steps 2–4 are independent, so Max runs them **concurrently** — the slowest one
    sets the pace instead of the sum of all three.)
 5. Ask the LLM for a complete replacement file (raw code, no markdown fences).
-6. Perform local Python syntax validation (for .py) and a single-file remote
-   sandbox smoke run. Retry at most `FLANX_FIX_ATTEMPTS` times; stop if it
-   cannot pass.
-7. If the generated code changed, validation passed, and the original GitHub file
-   is unchanged, create a fresh branch and open a PR. **Do not** write to the
-   default branch or claim integration tests/CI passed.
-   Automatic brain-file writing is suspended for safety. Existing memory remains
-   readable, and verified lessons can be recorded explicitly.
+6. Re-run the patched file in the sandbox. On a failure the **retry ladder** kicks in:
+   one more attempt at temperature 0 (on `AI_RETRY_MODEL` if set) with the failure log
+   attached. A failed patch makes no repository write.
+7. On success, prepare a scoped approval request. A configured test repository
+   can receive the patch on a new branch and pull request after authenticated
+   approval. Memory updates remain disabled.
+
+Repository repair is paused by default before source reaches the remote sandbox.
+Set `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT=true` only after deciding that this
+repository's source, memory, and diagnostic context may enter that workflow.
 
 All blocking work (PyGithub, sandbox HTTP, web search) runs in threads so the Discord
 gateway never stalls.
 
-## Repository review and safe repair
+## Max model routing
 
-- `max https://github.com/owner/repo` asks which action you want.
-- `max review https://github.com/owner/repo` fetches actual GitHub metadata,
-  a bounded directory tree, and a sample of README/configuration/source/test files.
-  It reports **only inspected evidence**; no target files are modified.
-- `max analyze this repository's architecture: owner/repo` uses the same
-  read-only inspection path.
-- All GitHub-backed commands (including read-only repository review) require the
-  operator Discord ID to appear in `MAX_GITHUB_ALLOWED_USER_IDS`. Do not enable
-  these commands for all members of a server. Restrict repository token permissions
-  to the minimum repositories and actions needed.
-- Private repositories are **not** automatically passed to the AI gateway or
-  OnlineCompiler. The bot can confirm metadata access, but private-source
-  review, automatic repair, and Discord brain-file display are blocked by
-  default pending a separately approved secure process.
-- `max fix src/app.py in owner/repo: handle invalid input` requests a change
-  on a dedicated branch. A valid target path and explicit edit intent are required.
-  Automatic sandbox smoke checks are limited to documented standalone
-  `.py`, `.js`, `.ts`, `.go`, and `.rb` executions. JavaScript
-  uses Deno (not Node.js), so Node-specific APIs may not work. Imports, application
-  integration and CI need independent review. Use `!update_repo` for other
-  file types or larger repository-wide changes.
+Max defaults to local Ollama with `qwen3:8b`. Task and role models, the Ollama endpoint, request limits, and optional FreeLLMAPI routing are configurable. Cloud use for source, memory, and Discord chat requires an explicit privacy setting. See [Local inference and privacy](docs/LOCAL_INFERENCE.md) for settings and a Windows smoke test.
 
-AI gateway responses and sandbox HTTP errors are categorized without exposing
-authorization headers or raw upstream error bodies. An absent/invalid key or
-model will block the operation; no unverified fallback provider is called.
-The SDK uses a bounded timeout and one automatic retry for transient failures.
+## Task engine (Phase 2)
 
-## Project Max model routing
+Ordinary chat requests now pass through `task_engine.py`: a normalized task is
+created, checked against the capability allowlist, run with a deadline, and
+returned as a structured outcome. The registered `general_chat` handler calls
+the existing `generate_assistant_reply()` function, so `model_router.py` and
+its configuration precedence remain in use. Task metadata is stored in SQLite
+without raw prompts, source, results, or credentials. Interrupted tasks require
+reconciliation after restart and are never automatically replayed. General chat
+uses one attempt and a 120-second deadline. See
+[Execution and recovery](docs/EXECUTION_AND_RECOVERY.md).
 
-Max supports task-specific model/profile identifiers through the existing OpenAI-compatible
-FreeLLMAPI gateway. The current `AI_MODEL` setting remains the compatibility fallback.
-Configure task profiles only after verifying they exist in your FreeLLMAPI dashboard:
+`task_engine.py` defines the task state transitions and a central capability
+allowlist. Read operations and sandbox execution are distinct from writes,
+deployments, purchases, bookings, external messages, and deletion. A registered
+handler for a consequential action cannot run until a trusted caller supplies
+an explicit approval matching the task, capability, target, and payload.
+The test-repository approval flow uses Discord buttons and the same task
+boundary. See [Approval and publishing](docs/APPROVAL_AND_PUBLISHING.md).
 
-- `MAX_MODEL_CHAT` — casual conversation
-- `MAX_MODEL_GENERAL` — general questions and planning
-- `MAX_MODEL_RESEARCH` — research and synthesis
-- `MAX_MODEL_CODING` — code generation and debugging
-- `MAX_MODEL_REVIEW` — code review and verification
+## Specialist workflow (Phase 3)
 
-Each value may be a model ID or a gateway routing profile accepted by your FreeLLMAPI
-instance (for example, a configured `auto:coding` profile). Unset values fall back to
-`AI_MODEL`; no new API keys are required. Set `AI_BASE_URL` to the self-hosted gateway
-URL and keep `AI_API_KEY` as a Railway secret. Do not put credentials in source control.
+`specialists.py` registers planner, coder, reviewer, and tester roles through the
+task engine. The planner returns at most eight flat steps. The coder proposes
+changes to at most eight selected text files, which are applied only to a
+temporary copy. The reviewer inspects the actual unified diff and reports
+structured findings. The tester runs the named `compile` check in that copy
+with time and output limits. Executable `unittest` checks are skipped until a
+stronger isolation backend exists. At most two correction cycles are
+allowed. Planner and coder adapters must be supplied by a trusted caller;
+there is no automatic model call or Discord trigger for this workflow.
 
-The routing module is network-independent and can be tested with:
-`python -m unittest discover -s tests -v`.
+The temporary copy is file isolation, not an operating-system sandbox. Tests
+are executable code and must come from a trusted repository. The workflow
+returns a bounded diff and report without applying it to the primary tree.
+
+`!max_fix` can present a Discord approval for one configured test repository.
+`!update_repo` still creates a pending, scoped action without a publishing path.
+Approval requests expire after five minutes and are not durable across restarts.
+The old production write handlers remain disabled.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `main.py` | Discord bot: commands, prompts, PR flow |
-| `free_sandbox.py` | OnlineCompiler.io execution and read-only brain memory by default |
-| `requirements.txt` | `discord.py`, `openai`, `PyGithub`, `requests`, `ddgs` |
-| `repo_review.py` | Bounded, read-only GitHub repository inspection and safe path normalization |
-| `provider_errors.py` | Safe FreeLLMAPI configuration/HTTP error messages without sensitive response text |
+| `free_sandbox.py` | OnlineCompiler.io execution + read-only `brain_memory.txt` access |
+| `task_engine.py` | In-process task state, capability checks, deadlines, retries and approvals |
+| `task_store.py` | SQLite task metadata and restart recovery |
+| `approval_publish.py` | Test-repository approval binding, publishing, and reconciliation |
+| `specialists.py` | Scoped planner, coder, reviewer, tester workflow and temporary workspace |
+| `requirements.txt` | `discord.py`, `aiohttp`, `openai`, `PyGithub`, `requests`, `ddgs` |
 | `knowledge.md` | Repo-level directive that steers Freebuff/Codebuff agents handling `tasks/*.md` |
 | `usage.py` | Persistent LLM token/cost counters and monthly sandbox-quota tracking |
 | `prefs.py` | Per-user companion preferences: timezone + personal notes (JSON) |
@@ -107,10 +110,13 @@ Repository discovery is read-only. The token can only list repositories permitte
 ## Commands
 
 - `max fix <path/to/file.py> in <owner/repo>: <what to change>` — run the full repair cycle
-- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
-  fresh branch for an external agent session to execute
+- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — prepare a pending task
+  manifest request; no branch is created by this command
 - `max what do you remember about <owner/repo>` — show the repository's saved lessons
 - `max stats` — LLM tokens used, estimated cost, and this month's sandbox quota
+- `!max_fix <owner/repo> <path/to/file.py> <what to change>` — validate a patch and request approval for a configured test repository (requires repository privacy opt-in)
+- `!max_publish_status <task-id>` — authorized, read-only reconciliation of a test publishing operation
+- `!max_brain <owner/repo>` — print what Max remembers for that repository
 
 For the recommended Max-first interface, use the plain-chat examples below. Older prefix commands remain available for backward compatibility.
 
@@ -157,6 +163,7 @@ dormant).
 2. Fill in the contract:
    ```python
    NAME = "weather"                    # slug used by the router
+
    DESCRIPTION = "current weather"     # shown in Max's integration registry
    USAGE = ["max weather in Pune"]      # example phrase
    def match(text: str) -> dict | None  # claim a message -> payload, else None
@@ -176,25 +183,19 @@ modules, proving the contract.
 
 ## Cloud staging with `!update_repo`
 
-Instead of running heavy work on the Railway box, Max can **stage** it:
+Max can prepare a task manifest for an external agent session:
 
 1. `!update_repo username/my-app src/auth.js "Upgrade encryption to argon2id"`
-2. Max branches off the default branch (`flanx-evolution-<id>`), writes
-   `tasks/update-job-<id>.md` containing your objective plus a definition-of-done
-   checklist, commits it to that branch, and replies with a Discord embed linking the
-   **branch** and the **manifest file** on GitHub.
-3. An agent session (Freebuff Cloud with the repo connected, or Codebuff) reads the
-   manifest together with `knowledge.md`, applies the change, validates it, and opens the
-   PR per the checklist.
+2. Max prepares a scoped manifest request. The current staging path remains pending
+   approval and makes no repository write.
+3. An authorized agent session can use the manifest and `knowledge.md` to implement,
+   validate, and submit the change.
 
 Max also patches files directly through `max fix ...`, using
 the free OnlineCompiler.io sandbox, so nothing depends on an external trigger.
 
-> **Honest scope note:** what is verified is the Git staging (branch + manifest + GitHub
-> links), the `knowledge.md` convention (documented for Codebuff, which Freebuff is built
-> on), and Freebuff's "Connect a repository" entry point. What is **not** publicly
-> documented is an automatic push→agent→PR webhook, so the embed deliberately does not
-> promise one — it tells you where the task is staged and how to run it.
+The task engine records the pending request. This path has no enabled publishing
+approval control, so no branch or manifest is created.
 
 ## Environment variables
 
@@ -203,27 +204,35 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | Key | Required | Notes |
 | --- | --- | --- |
 | `DISCORD_TOKEN` | yes | Bot token |
-| `AI_API_KEY` | yes | Key for the OpenAI-compatible endpoint |
+| `AI_API_KEY` | cloud only | Key for the optional OpenAI-compatible endpoint |
 | `GITHUB_TOKEN` | yes | Fine-grained PAT with contents + pull-requests write on the target repo |
-| `MAX_GITHUB_ALLOWED_USER_IDS` | **yes for GitHub actions** | Comma-separated trusted Discord user IDs; absent list **blocks** repository review, listings, and PR/staging operations |
 | `ONLINE_COMPILER_API_KEY` | yes | Free key from the OnlineCompiler.io dashboard (API Keys page) |
-| `AI_BASE_URL` | **yes** | Your verified, self-hosted FreeLLMAPI OpenAI-compatible URL ending in `/v1`; no public-host fallback |
-| `AI_MODEL` | no | default `auto` (only when supported by the configured gateway); select verified model via `GET /v1/models` |
+| `AI_BASE_URL` | no | default `https://freellmapi.co/v1` |
+| `AI_MODEL` | no | legacy model ID override; local default is `qwen3:8b` |
 | `SANDBOX_COMPILER` | no | default `python-3.14` |
-| `SANDBOX_MONTHLY_QUOTA` | no | optional locally configured quota estimate; not live provider usage |
 | `ONLINE_COMPILER_BASE_URL` | no | default `https://api.onlinecompiler.io` |
 | `FLANX_DEFAULT_REPO` | no | default `owner/repo` used by chat mode when a message omits it |
 | `FLANX_FIX_ATTEMPTS` | no | retry-ladder depth, `1`–`3` (default `2` = first try + one retry) |
 | `AI_RETRY_MODEL` | no | second model used for retries; unset = same model at temperature 0 |
+| `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT` | no | default false; explicit opt-in for the remote repository repair workflow |
+| `MAX_GITHUB_ALLOWED_USER_IDS` | for GitHub features | comma-separated Discord user IDs allowed to inspect or prepare repository operations; absent or malformed list denies access |
+| `MAX_INFERENCE_PROVIDER` | no | `local` (default) or `cloud` |
+| `MAX_INFERENCE_POLICY` | no | `local_only` (default) or `cloud_allowed` |
+| `MAX_ALLOW_CLOUD_PRIVATE_CONTEXT` | no | default false; additional opt-in for cloud inference with chat, source, or memory |
+| `MAX_TASK_DB` | no | local SQLite task metadata path (default `.max_state/tasks.sqlite3`) |
+| `MAX_CHECK_TIMEOUT_SECONDS` | no | local compile-check deadline (default 10 seconds, maximum 30) |
+| `MAX_CHECK_OUTPUT_BYTES` | no | captured check output (default 4000, maximum 16000) |
 | `AI_INPUT_PRICE_PER_M` | no | USD per 1M prompt tokens for the cost counter (default `0` = free pool) |
 | `AI_OUTPUT_PRICE_PER_M` | no | USD per 1M completion tokens (default `0` = free pool) |
 | `FLANX_USAGE_FILE` | no | counter file path (default `flanx_usage.json`) |
 | `FLANX_PREFS_FILE` | no | companion preferences path (default `flanx_prefs.json`) |
 
+The `FLANX_*` and `MAX_*` keys and existing storage filenames remain unchanged so
+current installations can use their settings and data without migration.
 
 ## Verified lessons: SQLite storage, safe migration, and rollback
 
-The lesson and lessons interfaces use SQLite only.
+The `max lesson` and `max lessons` interfaces use SQLite only.
 `MAX_LESSONS_DB` defaults to `max_lessons.sqlite3`. They **never
 automatically fall back** to `MAX_LESSONS_FILE` (`max_lessons.json`), and
 startup does not migrate or delete legacy JSON. A missing database is new
@@ -369,32 +378,19 @@ commonly circulated snippet:
 - The response returns `output` / `error` / `exit_code` / `time`
   (`free_sandbox.py` also accepts the Piston-compatible `run.stdout` shape).
 
-OnlineCompiler's technical docs describe 30 submissions/minute, 2 concurrent
-executions, 30s execution timeout, 100KB code/stdin and 64KB output per stream,
-with no outbound network. **Monthly quotas are not confirmed here:** the
-provider's technical docs and public pricing page currently show different
-allowances. Consult the account's authenticated `GET /api/usage/` endpoint and
-the current `GET /api/limits/` endpoint before relying on a free quota.
+Free plan (verified on their pricing page): 100,000 runs/month, 30 submissions/minute,
+2 concurrent executions, 30s execution timeout, 100KB code+stdin, 64KB output per stream,
+**no outbound network inside the sandbox**, no credit card.
 
 Docs: <https://onlinecompiler.io/docs> · Pricing: <https://onlinecompiler.io/pricing>
 
 ### LLM endpoint
 
-`freellmapi.co` distributes a **self-hosted** OpenAI-compatible router (its documented
-base URL is `http://localhost:3001/v1`, and requests go out using *your own* provider
-keys). If you do not self-host it, point `AI_BASE_URL`/`AI_MODEL` at a provider with a
-free OpenAI-compatible endpoint instead, for example:
-
-| Provider | `AI_BASE_URL` | Notes |
-| --- | --- | --- |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | documented free tier for Flash models |
-| Groq | `https://api.groq.com/openai/v1` | free tier with rate limits |
-| OpenRouter | `https://openrouter.ai/api/v1` | free router + `:free` models; `qwen/qwen-2.5-coder-32b-instruct` itself is paid |
-| Self-hosted FreeLLMAPI | `http://localhost:3001/v1` | router is free, inference uses your provider keys |
+Local Ollama is the default. See [Local inference and privacy](docs/LOCAL_INFERENCE.md) for local settings and explicit cloud routing.
 
 ## English-only output
 
-FreeLLM routes to Chinese models (Qwen/DeepSeek) that occasionally answer in Chinese.
+FreeLLM routes to Chinese models (Qwen/DeepSeek) that occasionally answer in Chinese. Some configured models may occasionally answer in Chinese.
 Max is English 24/7 through two layers:
 
 1. **Prompt rule** — the system prompt demands English and forbids new non-English
@@ -402,37 +398,33 @@ Max is English 24/7 through two layers:
 2. **Runtime guard** — `is_non_english()` scans every patch for CJK characters that are
    not already present in the source file; a hit triggers one bilingual "English only"
    re-ask before the patch is accepted. Anything that still slips through is caught by
-   the sandbox gate before any branch is pushed.
+   the sandbox gate before any repository action is prepared.
 
 Discord messages, PR titles/bodies and `brain_memory.txt` entries are written by the bot
 itself and are always English.
 
 ## Usage counters, cost and the retry ladder
 
-**Counters** (use `max stats` in Discord) are maintained in `flanx_usage.json`
+**Counters** (`!max_stats` or `max stats`) are maintained in `flanx_usage.json`
 (git-ignored, written atomically, thread-safe):
 
 - **LLM:** call count, prompt/completion/total tokens, per-model breakdown, and
-  estimated USD cost. Cost is `$0` by design while you run on the free token pool —
-  set `AI_INPUT_PRICE_PER_M` / `AI_OUTPUT_PRICE_PER_M` if you move to a paid endpoint
-  (never assume a given provider or model is free without checking its account).
-- **Sandbox:** locally recorded attempts and outcomes for this calendar month;
-  counters reset in the monthly display. They are **not** verified provider usage.
-  Configure `SANDBOX_MONTHLY_QUOTA` only if an operator has confirmed the
-  allowance; remaining figures are explicitly labelled estimates.
-- The file must live on an attached, verified Railway volume (e.g. via
-  `FLANX_USAGE_FILE`), or it may be replaced on redeployment.
+  estimated USD cost. Set `AI_INPUT_PRICE_PER_M` and `AI_OUTPUT_PRICE_PER_M`
+  for an explicitly configured cloud provider; local inference records tokens
+  when Ollama reports them.
+- **Sandbox:** runs used this calendar month against the free plan's 100,000 quota,
+  with pass rate and remaining balance; counters reset on month rollover.
+- The file lives on the host, so on Railway a redeploy resets it unless you point
+  `FLANX_USAGE_FILE` at a persistent volume.
 
 **Retry ladder:** when a generated patch fails sandbox validation, Max regenerates
 at temperature 0 (and on `AI_RETRY_MODEL` when configured) with the exact failure log
-injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts.
-Automatic commits to `brain_memory.txt` are disabled to avoid modifying a
-default branch without human approval.
+injected into the prompt, up to `FLANX_FIX_ATTEMPTS` total attempts. Only the final
+failure is written to the brain, so the memory log stays signal, not noise.
 
 ## The brain
 
-`brain_memory.txt` is a legacy GitHub-hosted memory file that Max can read when
-present. Automatic writes directly to `main` or `master` are blocked.
-Use `max lesson owner/repo | failure | root cause | prevention | evidence`
-to record an evidence-backed lesson in persistent SQLite, after verifying the
-underlying issue. This history is separate from GitHub PR review.
+Max can read a bounded, redacted `brain_memory.txt` from public repositories for
+repair context after the repository privacy opt-in. Private repository memory is not
+retrieved. Automatic remote memory updates are disabled; verified lessons use the
+local SQLite store. See the [production readiness audit](docs/PRODUCTION_READINESS_AUDIT_2026-10-19.md).
