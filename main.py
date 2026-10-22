@@ -18,6 +18,7 @@ Discord gateway connection never stalls.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -34,6 +35,9 @@ from model_router import ModelError, ModelRouter, route_model
 from prefs import get_pref
 from task_engine import ActionNotStarted, Orchestrator, Status, Task
 from approval_publish import PublishConfig, PublishError, PublishingCoordinator
+from composio_adapter import ComposioAdapter, IntegrationError
+from external_actions import ExternalActionService
+from memory_store import MemoryStore
 
 import integrations  # pluggable modules: drop a file into integrations/ to add one
 
@@ -84,6 +88,19 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 gh = Github(GITHUB_TOKEN or None)
 model_router = ModelRouter()
 publish_config = PublishConfig.from_env()
+try:
+    composio_adapter = ComposioAdapter.from_env()
+    external_service = (ExternalActionService(
+        composio_adapter, store_path=TASK_DB,
+        audit_path=os.path.join(os.path.dirname(TASK_DB), "external_actions.sqlite3"),
+        memory_path=os.getenv("MAX_MEMORY_DB") or os.path.join(
+            os.path.dirname(TASK_DB), "memories.sqlite3"))
+        if not composio_adapter.policy.emergency_off else None)
+    composio_configuration_error = None
+except (ValueError, OSError, IntegrationError) as exc:
+    composio_adapter = None
+    external_service = None
+    composio_configuration_error = type(exc).__name__
 publisher = PublishingCoordinator(publish_config,
                                   lambda: Github(publish_config.token, timeout=15, retry=0))
 
@@ -406,7 +423,7 @@ FILE_EXT_PATTERN = (
 )
 FILE_PATH_RE = re.compile(rf"\b[\w][\w./-]*\.(?:{FILE_EXT_PATTERN})\b", re.IGNORECASE)
 REPO_RE = re.compile(r"\b([\w.-]{1,39})/([\w.-]{1,100})\b")
-CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|hi|hello|yo|oi)\s+)?(?:max|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+CHAT_NAME_RE = re.compile(r"^\s*(?:(?:hey|hi|hello|yo|oi)\s+)?(?:max|mex|flanx)\b[:,]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 SEARCH_VERB_RE = re.compile(r"\b(?:search|look\s*up|google)\b", re.IGNORECASE)
 MEMORY_RE = re.compile(r"\b(?:brain|memory|remember|lessons|learned)\b", re.IGNORECASE)
 STATS_RE = re.compile(
@@ -846,7 +863,7 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             asyncio.to_thread(run_code, original_code),
         )
         baseline_report = baseline.for_prompt("baseline run")
-if any(CREDENTIAL_RE.search(item) for item in (past_memories, live_web_intel, baseline_report)):
+        if any(CREDENTIAL_RE.search(item) for item in (past_memories, live_web_intel, baseline_report)):
             await ctx.send("⚠️ Repair stopped because context may contain credentials. No model call or repository write was made.")
             return
         _record_usage_safely(record_sandbox_run, baseline)
@@ -1020,6 +1037,215 @@ async def flanx_brain(ctx, repo_name: str):
 async def flanx_stats(ctx):
     """Show LLM token usage, estimated cost and sandbox quota consumption."""
     await ctx.send(await asyncio.to_thread(format_usage))
+
+
+class ExternalApprovalView(discord.ui.View):
+    def __init__(self, task_id: str, requester_id: int):
+        super().__init__(timeout=90)
+        self.task_id = task_id
+        self.requester_id = requester_id
+
+    async def _decide(self, interaction: discord.Interaction, approve: bool):
+        if interaction.user.id != self.requester_id or interaction.user.id not in publish_config.approver_ids:
+            await interaction.response.send_message("Not authorized for this action.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            outcome = await external_service.decide(self.task_id,
+                approved_by=str(interaction.user.id), approve=approve)
+            for button in self.children:
+                button.disabled = True
+            if interaction.message:
+                await interaction.message.edit(view=self)
+            await interaction.followup.send(
+                f"Action `{self.task_id}`: `{outcome.status}`. Check status before any new request.",
+                ephemeral=True)
+        except (IntegrationError, ValueError):
+            await interaction.followup.send("Approval unavailable or expired.", ephemeral=True)
+
+    @discord.ui.button(label="Approve action", style=discord.ButtonStyle.danger)
+    async def approve_action(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._decide(interaction, True)
+
+    @discord.ui.button(label="Reject action", style=discord.ButtonStyle.secondary)
+    async def reject_action(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._decide(interaction, False)
+
+
+def _external_admin(ctx) -> bool:
+    return ctx.author.id in publish_config.approver_ids
+
+
+def _memory_store() -> MemoryStore:
+    return MemoryStore(os.getenv("MAX_MEMORY_DB") or os.path.join(
+        os.path.dirname(TASK_DB), "memories.sqlite3"))
+
+
+@bot.command(name="max_capabilities")
+async def max_capabilities(ctx):
+    if ctx.guild is not None:
+        await ctx.send("Use this command in a DM to Max.")
+        return
+    if not _external_admin(ctx):
+        await ctx.send("Not authorized.")
+        return
+    if external_service is None:
+        await ctx.send("Composio is disabled or unavailable.")
+        return
+    policy = external_service.adapter.policy
+    lines = [f"Autonomy: `{policy.autonomy}`; emergency disable: `{policy.emergency_off}`"]
+    for action in policy.actions.values():
+        disabled = action.toolkit in policy.disabled_integrations or action.slug in policy.disabled_actions
+        lines.append(f"`{action.slug}` on `{action.account_id}`: {action.risk}, "
+                     f"{action.category}, {'disabled' if disabled else 'enabled'}")
+    await ctx.send(clip("\n".join(lines), 1900))
+
+
+@bot.command(name="max_tool")
+async def max_tool(ctx, account_id: str, slug: str, *, arguments_json: str = "{}"):
+    if ctx.guild is not None:
+        await ctx.send("Use this command in a DM to Max so arguments stay private.")
+        return
+    if not _external_admin(ctx) or external_service is None:
+        await ctx.send("Action unavailable or unauthorized.")
+        return
+    try:
+        arguments = json.loads(arguments_json)
+        if not isinstance(arguments, dict):
+            raise ValueError("JSON object required")
+        outcome = await external_service.start(account_id, slug, arguments,
+                                               requester_id=str(ctx.author.id))
+    except (ValueError, IntegrationError):
+        await ctx.send("Action rejected by configuration, connection state, or schema.")
+        return
+    if outcome.status == Status.AWAITING_APPROVAL.value:
+        await ctx.send(f"Approve `{slug}` on `{account_id}` for task `{outcome.task_id}`? "
+                       "Review the exact command arguments above before approving.",
+                       view=ExternalApprovalView(outcome.task_id, ctx.author.id))
+    elif outcome.status == Status.COMPLETED.value:
+        if outcome.result and "untrusted_external_data" in outcome.result:
+            await ctx.author.send("External content (untrusted):\n```json\n" +
+                                  clip(json.dumps(outcome.result["untrusted_external_data"],
+                                                  ensure_ascii=False), 1700) + "\n```",
+                                  allowed_mentions=discord.AllowedMentions.none())
+            await ctx.send(f"Task `{outcome.task_id}` completed. Result sent by DM.")
+        else:
+            await ctx.send(f"Task `{outcome.task_id}` completed.")
+    else:
+        await ctx.send(f"Task `{outcome.task_id}`: `{outcome.status}` "
+                       f"(`{outcome.error_code or 'unknown'}`).")
+
+
+@bot.command(name="max_tool_status")
+async def max_tool_status(ctx, task_id: str):
+    if ctx.guild is not None:
+        await ctx.send("Use this command in a DM to Max.")
+        return
+    if not _external_admin(ctx) or external_service is None:
+        await ctx.send("Not authorized or unavailable.")
+        return
+    record = external_service.audit.get(task_id)
+    if record is None:
+        await ctx.send("Unknown task.")
+    else:
+        await ctx.send(f"`{task_id}`: `{record['status']}`; error: "
+                       f"`{record['error_code'] or 'none'}`. Uncertain actions require "
+                       "read-only reconciliation in the connected application.")
+
+
+@bot.command(name="max_tool_cancel")
+async def max_tool_cancel(ctx, task_id: str):
+    if ctx.guild is not None:
+        await ctx.send("Use this command in a DM to Max.")
+        return
+    if not _external_admin(ctx) or external_service is None:
+        await ctx.send("Not authorized or unavailable.")
+        return
+    try:
+        outcome = await external_service.cancel(task_id)
+    except (IntegrationError, KeyError):
+        await ctx.send("Unknown task.")
+        return
+    await ctx.send(f"Task `{task_id}`: `{outcome.status}`.")
+
+
+@bot.command(name="max_tool_disable")
+async def max_tool_disable(ctx):
+    if ctx.guild is not None:
+        await ctx.send("Use this command in a DM to Max.")
+        return
+    if not _external_admin(ctx) or external_service is None:
+        await ctx.send("Not authorized or unavailable.")
+        return
+    external_service.adapter.policy.emergency_off = True
+    await ctx.send("All Composio actions disabled for this process. Set "
+                   "MAX_EXTERNAL_ACTIONS_DISABLED=1 for restart persistence.")
+
+
+@bot.command(name="max_memories")
+async def max_memories(ctx, scope: str = "user"):
+    if ctx.guild is not None or not _external_admin(ctx):
+        await ctx.send("Use this command in an authorized DM.")
+        return
+    try:
+        rows = await asyncio.to_thread(_memory_store().list, scope=scope)
+        lines = [f"`{row['id']}` [{row['status']}, {row['category']}, "
+                 f"confidence {row['confidence']:.2f}] {row['content']}" for row in rows]
+        await ctx.send(clip("\n".join(lines) if lines else "No memory records.", 1900))
+    except (OSError, ValueError):
+        await ctx.send("Memory storage unavailable.")
+
+
+@bot.command(name="max_memory_correct")
+async def max_memory_correct(ctx, record_id: str, *, content: str):
+    if ctx.guild is not None or not _external_admin(ctx):
+        await ctx.send("Use this command in an authorized DM.")
+        return
+    try:
+        row = await asyncio.to_thread(_memory_store().correct, record_id,
+                                      content=content, source="Discord user correction")
+        await ctx.send(f"Memory `{row['id']}` corrected and returned to proposed status.")
+    except (OSError, ValueError, KeyError):
+        await ctx.send("Memory correction rejected or unavailable.")
+
+
+@bot.command(name="max_memory_propose")
+async def max_memory_propose(ctx, category: str, scope: str, *, content: str):
+    if ctx.guild is not None or not _external_admin(ctx):
+        await ctx.send("Use this command in an authorized DM.")
+        return
+    try:
+        row = await asyncio.to_thread(_memory_store().add,
+            category=category, scope=scope, content=content,
+            source="Authorized Discord user", confidence=0.5)
+        await ctx.send(f"Memory `{row['id']}` is `{row['status']}`.")
+    except (OSError, ValueError):
+        await ctx.send("Memory proposal rejected.")
+
+
+@bot.command(name="max_memory_verify")
+async def max_memory_verify(ctx, record_id: str, *, evidence: str):
+    if ctx.guild is not None or not _external_admin(ctx):
+        await ctx.send("Use this command in an authorized DM.")
+        return
+    try:
+        row = await asyncio.to_thread(_memory_store().verify, record_id,
+                                      evidence=evidence, confidence=0.9)
+        await ctx.send(f"Memory `{row['id']}` verified.")
+    except (OSError, ValueError, KeyError):
+        await ctx.send("Verification rejected or unavailable.")
+
+
+@bot.command(name="max_memory_delete")
+async def max_memory_delete(ctx, record_id: str):
+    if ctx.guild is not None or not _external_admin(ctx):
+        await ctx.send("Use this command in an authorized DM.")
+        return
+    try:
+        deleted = await asyncio.to_thread(_memory_store().delete, record_id)
+        await ctx.send("Memory deleted." if deleted else "Unknown memory record.")
+    except OSError:
+        await ctx.send("Memory storage unavailable.")
 
 
 if __name__ == "__main__":

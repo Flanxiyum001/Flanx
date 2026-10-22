@@ -60,6 +60,7 @@ class ToolSpec:
     permission: Permission
     approval_required: bool = False
     target_required: bool = False
+    consequential: bool = False
 
 
 # An allowlist of capabilities, not executable functions. Phase 2 only wires model.reply.
@@ -80,6 +81,8 @@ TOOLS = MappingProxyType({
         ToolSpec("message.send", "Send an external message", Permission.MESSAGE, True, True),
         ToolSpec("user_data.write", "Modify saved user data", Permission.WRITE, True, True),
         ToolSpec("user_data.delete", "Delete saved user data", Permission.DESTRUCTIVE, True, True),
+        ToolSpec("composio.read", "Read from a configured connected account", Permission.READ),
+        ToolSpec("composio.write", "Approved connected-account action", Permission.WRITE, True, True, True),
     )
 })
 
@@ -269,7 +272,7 @@ def _restore_task(record: dict) -> Task | None:
             error_code=error,
         )
         if task.status in (Status.PENDING, Status.RUNNING, Status.AWAITING_APPROVAL):
-            consequential = any(TOOLS[name].approval_required for name in tools)
+            consequential = any(TOOLS[name].consequential or TOOLS[name].approval_required for name in tools)
             if task.status == Status.AWAITING_APPROVAL:
                 code = "approval_expired"
             elif task.status == Status.RUNNING and consequential:
@@ -457,7 +460,7 @@ class Orchestrator:
                     async with self._lock:
                         current = self._tasks[task.task_id]
                         if current.status not in (Status.CANCELLED, Status.INTERRUPTED):
-                            consequential = TOOLS[spec.tool].approval_required
+                            consequential = tool.consequential or tool.approval_required
                             current = current.transition(
                                 Status.INTERRUPTED if consequential else Status.CANCELLED,
                                 error_code="outcome_uncertain" if consequential else None)
@@ -474,7 +477,7 @@ class Orchestrator:
                         current = self._tasks[task.task_id]
                         if current.status in (Status.CANCELLED, Status.INTERRUPTED):
                             return Outcome(current, error="Task stopped; outcome may be uncertain.")
-                        if tool.approval_required:
+                        if tool.consequential or tool.approval_required:
                             current = current.transition(Status.INTERRUPTED, error_code="outcome_uncertain")
                             self._remember(current)
                             return Outcome(current, error="External action outcome is uncertain; reconcile before retrying.")
@@ -500,7 +503,7 @@ class Orchestrator:
             current = self._tasks[task_id]
             if current.status in (Status.CANCELLED, Status.INTERRUPTED):
                 return Outcome(current, error="Task stopped; outcome may be uncertain.")
-            if any(TOOLS[name].approval_required for name in current.permitted_tools if name in TOOLS):
+            if any(TOOLS[name].consequential or TOOLS[name].approval_required for name in current.permitted_tools if name in TOOLS):
                 interrupted = current.transition(Status.INTERRUPTED, error_code="outcome_uncertain")
                 self._remember(interrupted)
                 return Outcome(interrupted, error="External action outcome is uncertain; reconcile before retrying.")
@@ -564,7 +567,7 @@ class Orchestrator:
                 return current
             consequential_running = (
                 current.status == Status.RUNNING
-                and any(TOOLS[name].approval_required for name in current.permitted_tools if name in TOOLS)
+                and any(TOOLS[name].consequential or TOOLS[name].approval_required for name in current.permitted_tools if name in TOOLS)
             )
             current = current.transition(
                 Status.INTERRUPTED if consequential_running else Status.CANCELLED,

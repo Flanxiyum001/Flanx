@@ -1,5 +1,27 @@
 # Max Implementation Plan
 
+## Phase 7 implemented increment (October 2026)
+
+The optional Composio direct-tools adapter is now behind a configured,
+account-specific action policy and the existing task engine. Discord admins can
+execute a discovered read action in a DM and propose a configured write. Writes
+always require the existing requester-bound approval mechanism; even
+`trusted_autonomy` does not bypass it in this increment. Tool arguments are
+checked against a conservative subset of the action's live schema. An absent
+SDK, configuration, active connection, matching version, or supported schema
+prevents execution. The adapter does not expose Composio meta tools, proxy,
+remote shell, or workbench to models.
+
+Task and action status are stored without payloads in SQLite. A timeout or
+ambiguous write is interrupted and must be reconciled by inspection in the
+connected application. Discord commands expose status, cancellation, and an
+in-process emergency disable. See [Composio and memory](PHASE7_COMPOSIO.md).
+
+A separate SQLite store now supports scoped proposed/verified memories,
+corrections, deletion, expiry, and task feedback. It does not automatically
+promote model output or external content into verified knowledge. The existing
+repository lesson database and specialist repair workflow remain in use.
+
 ## Product goals
 
 Max is a friendly, personalized Discord-first assistant that improves from verified experience while keeping the existing Railway deployment and operating costs under control.

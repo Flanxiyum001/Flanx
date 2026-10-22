@@ -8,3 +8,6 @@ max_lessons.json
 max_lessons.sqlite3
 max_lessons.sqlite3-*
 .max_state/
+.env
+.env.*
+!.env.example

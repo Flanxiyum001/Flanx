@@ -11,6 +11,7 @@ A completed backup must be copied off any ephemeral container before cutover.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import math
@@ -126,7 +127,7 @@ def _validate_json(name: str, path: Path) -> dict:
 
 def _sqlite_details(path: Path) -> dict:
     """Check the live source in read-only mode without creating a missing DB."""
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5) as conn:
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
         result = conn.execute("PRAGMA integrity_check").fetchone()
         if not result or result[0] != "ok":
             raise ValueError("SQLite integrity check failed")
@@ -266,8 +267,8 @@ def backup(destination: str, *, expected_existing=(), allow_missing=()) -> dict:
             filename = name + (source.suffix or ".bin")
             output = target / filename
             if name == "lessons_db":
-                with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as src:
-                    with sqlite3.connect(output) as dst:
+                with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as src:
+                    with closing(sqlite3.connect(output)) as dst:
                         src.backup(dst)
                         # The online snapshot can inherit WAL journal mode. Make
                         # the COPY self-contained without altering the source.

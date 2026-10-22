@@ -320,7 +320,7 @@ class LearningTests(unittest.TestCase):
     def test_rerunning_identical_json_does_not_rewrite_destination(self):
         record = self.add(failure="identical-source")
         self.write_json([record])
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn, conn:
             conn.execute(
                 "CREATE TRIGGER reject_update BEFORE UPDATE ON lessons "
                 "BEGIN SELECT RAISE(FAIL, 'unexpected rewrite'); END"

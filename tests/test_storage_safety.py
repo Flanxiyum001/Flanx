@@ -1,5 +1,6 @@
 """Tests for non-destructive usage persistence and storage backup helpers."""
 import json
+from contextlib import closing
 import os
 import sqlite3
 import subprocess
@@ -317,15 +318,15 @@ class UsageStorageTests(unittest.TestCase):
             handle.write(b"not a sqlite file")
         self.assertEqual(storage_admin._inspect("lessons_db", bad)["status"], "corrupt")
         os.unlink(bad)
-        with sqlite3.connect(bad) as conn:
+        with closing(sqlite3.connect(bad)) as conn, conn:
             conn.execute("CREATE TABLE lessons (id TEXT)")
         self.assertEqual(storage_admin._inspect("lessons_db", bad)["status"], "corrupt")
-        with sqlite3.connect(bad) as conn:
+        with closing(sqlite3.connect(bad)) as conn, conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0], 0)
 
     def test_wal_commits_are_included_in_sqlite_online_backup(self):
         db = os.path.join(self.temp.name, "wal.sqlite3")
-        with sqlite3.connect(db) as connection:
+        with closing(sqlite3.connect(db)) as connection, connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(learning._SCHEMA)
             connection.execute(
@@ -345,7 +346,7 @@ class UsageStorageTests(unittest.TestCase):
                 manifest = storage_admin.backup(backup_dir, allow_missing=list(storage_admin.STATE_PATHS))
                 self.assertEqual(manifest["files"][0]["lesson_count"], 1)
                 self.assertEqual(storage_admin.verify_backup(backup_dir)["files_verified"], 1)
-                with sqlite3.connect(os.path.join(backup_dir, "lessons_db.sqlite3")) as saved:
+                with closing(sqlite3.connect(os.path.join(backup_dir, "lessons_db.sqlite3"))) as saved:
                     self.assertEqual(saved.execute("SELECT failure FROM lessons").fetchone()[0], "wal")
 
     def test_failed_copy_preserves_partial_directory_and_incomplete_manifest(self):
@@ -382,7 +383,7 @@ class UsageStorageTests(unittest.TestCase):
 
     def test_valid_empty_databases_count_as_recoverable_files(self):
         db = os.path.join(self.temp.name, "empty.sqlite3")
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn, conn:
             conn.execute(learning._SCHEMA)
         with patch.dict(storage_admin.FILES, {
             "lessons_db": db,

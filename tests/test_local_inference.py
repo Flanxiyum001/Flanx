@@ -137,6 +137,19 @@ class LocalInferenceTests(unittest.IsolatedAsyncioTestCase):
                          ("cloud answer", "gateway-model", 4))
         self.assertEqual(create.call_args.kwargs["model"], "legacy-id")
 
+    async def test_cloud_request_redacts_credentials_even_when_permitted(self):
+        raw = SimpleNamespace(model="cloud", choices=[SimpleNamespace(
+            message=SimpleNamespace(content="ok"))], usage=None)
+        create = AsyncMock(return_value=raw)
+        cloud = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        router = ModelRouter(environ={"MAX_INFERENCE_POLICY": "cloud_allowed",
+                                      "MAX_ALLOW_CLOUD_SOURCE": "true"}, cloud_client=cloud)
+        await router.generate([{"role": "user", "content": "api_key=private-value, token sk-abcdefghijklmno"}],
+                              provider="cloud", data_class="source")
+        forwarded = create.call_args.kwargs["messages"][0]["content"]
+        self.assertNotIn("private-value", forwarded)
+        self.assertNotIn("sk-abcdefghijklmno", forwarded)
+
     async def test_class_specific_cloud_permission(self):
         raw = SimpleNamespace(model="cloud", choices=[SimpleNamespace(
             message=SimpleNamespace(content="allowed"))], usage=None)

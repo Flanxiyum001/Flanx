@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Mapping
 from types import SimpleNamespace
@@ -21,6 +22,21 @@ ROLE_TASKS = {"planner": "general", "coder": "coding", "reviewer": "review", "te
 PRIVATE_DATA = frozenset({"private_repo", "source", "memory"})
 DEFAULT_LOCAL_MODEL = "qwen3:8b"
 DEFAULT_VISION_MODEL = "qwen3-vl:8b"
+_LABELED_SECRET = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|"
+    r"authorization|cookie|client[_-]?secret)\s*[:=]\s*[^\r\n,}]+")
+_TOKEN_VALUE = re.compile(r"(?i)\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{12,}")
+_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
+
+
+def _redact_cloud_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    redacted = []
+    for message in messages:
+        content = _PRIVATE_KEY.sub("[redacted private key]", message["content"])
+        content = _LABELED_SECRET.sub("[redacted credential]", content)
+        content = _TOKEN_VALUE.sub("[redacted token]", content)
+        redacted.append({"role": message["role"], "content": content})
+    return redacted
 
 
 def _count(value):
@@ -198,7 +214,7 @@ class ModelRouter:
             async with self._local_slots:
                 return await self._local(messages, chosen, temperature, max_tokens)
         async with self._cloud_slots:
-            return await self._cloud(messages, chosen, temperature, max_tokens)
+            return await self._cloud(_redact_cloud_messages(messages), chosen, temperature, max_tokens)
 
     async def _local(self, messages, model, temperature, max_tokens) -> ModelReply:
         cfg = self.config
