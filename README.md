@@ -85,7 +85,7 @@ The old production write handlers remain disabled.
 | File | Purpose |
 | --- | --- |
 | `main.py` | Discord bot: commands, prompts, PR flow |
-| `free_sandbox.py` | OnlineCompiler.io execution + `brain_memory.txt` read/write |
+| `free_sandbox.py` | OnlineCompiler.io execution + read-only `brain_memory.txt` access |
 | `task_engine.py` | In-process task state, capability checks, deadlines, retries and approvals |
 | `task_store.py` | SQLite task metadata and restart recovery |
 | `approval_publish.py` | Test-repository approval binding, publishing, and reconciliation |
@@ -110,8 +110,8 @@ Repository discovery is read-only. The token can only list repositories permitte
 ## Commands
 
 - `max fix <path/to/file.py> in <owner/repo>: <what to change>` — run the full repair cycle
-- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — stage a task manifest on a
-  fresh branch for an external agent session to execute
+- `!update_repo <owner/repo> <path/to/file.py> <instruction>` — prepare a pending task
+  manifest request; no branch is created by this command
 - `max what do you remember about <owner/repo>` — show the repository's saved lessons
 - `max stats` — LLM tokens used, estimated cost, and this month's sandbox quota
 - `!max_fix <owner/repo> <path/to/file.py> <what to change>` — validate a patch and request approval for a configured test repository (requires repository privacy opt-in)
@@ -183,28 +183,19 @@ modules, proving the contract.
 
 ## Cloud staging with `!update_repo`
 
-Instead of running heavy work on the Railway box, Max can **stage** it:
+Max can prepare a task manifest for an external agent session:
 
 1. `!update_repo username/my-app src/auth.js "Upgrade encryption to argon2id"`
-2. Max branches off the default branch (`flanx-evolution-<id>`), writes
-   `tasks/update-job-<id>.md` containing your objective plus a definition-of-done
-   checklist, commits it to that branch, and replies with a Discord embed linking the
-   **branch** and the **manifest file** on GitHub.
-3. An agent session (Freebuff Cloud with the repo connected, or Codebuff) reads the
-   manifest together with `knowledge.md`, applies the change, validates it, and opens the
-   PR per the checklist.
+2. Max prepares a scoped manifest request. The current staging path remains pending
+   approval and makes no repository write.
+3. An authorized agent session can use the manifest and `knowledge.md` to implement,
+   validate, and submit the change.
 
 Max also patches files directly through `max fix ...`, using
 the free OnlineCompiler.io sandbox, so nothing depends on an external trigger.
 
-> **Honest scope note:** what is verified is the Git staging (branch + manifest + GitHub
-> links), the `knowledge.md` convention (documented for Codebuff, which Freebuff is built
-> on), and Freebuff's "Connect a repository" entry point. What is **not** publicly
-> documented is an automatic push→agent→PR webhook, so the embed deliberately does not
-> promise one — it tells you where the task is staged and how to run it.
-
-The task engine returns a pending approval request bound to the repository,
-branch, manifest path, and exact payload. No branch or manifest is created without approval.
+The task engine records the pending request. This path has no enabled publishing
+approval control, so no branch or manifest is created.
 
 ## Environment variables
 
@@ -224,6 +215,7 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `FLANX_FIX_ATTEMPTS` | no | retry-ladder depth, `1`–`3` (default `2` = first try + one retry) |
 | `AI_RETRY_MODEL` | no | second model used for retries; unset = same model at temperature 0 |
 | `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT` | no | default false; explicit opt-in for the remote repository repair workflow |
+| `MAX_GITHUB_ALLOWED_USER_IDS` | for GitHub features | comma-separated Discord user IDs allowed to inspect or prepare repository operations; absent or malformed list denies access |
 | `MAX_INFERENCE_PROVIDER` | no | `local` (default) or `cloud` |
 | `MAX_INFERENCE_POLICY` | no | `local_only` (default) or `cloud_allowed` |
 | `MAX_ALLOW_CLOUD_PRIVATE_CONTEXT` | no | default false; additional opt-in for cloud inference with chat, source, or memory |
@@ -432,9 +424,7 @@ failure is written to the brain, so the memory log stays signal, not noise.
 
 ## The brain
 
-`brain_memory.txt` in the target repository is Max's long-term memory. Every run
-appends a timestamped line (failures and successes), it is trimmed to ~12KB so it always
-fits in one prompt, and it is committed straight to the default branch so you can watch
-the bot learn in the GitHub history. Max can read it for repair context after the
-repository privacy opt-in. Automatic remote memory updates are disabled until they can
-pass the same scoped approval gate.
+Max can read a bounded, redacted `brain_memory.txt` from public repositories for
+repair context after the repository privacy opt-in. Private repository memory is not
+retrieved. Automatic remote memory updates are disabled; verified lessons use the
+local SQLite store. See the [production readiness audit](docs/PRODUCTION_READINESS_AUDIT_2026-10-19.md).

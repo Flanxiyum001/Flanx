@@ -13,8 +13,12 @@ class LessonIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "prevention": "P" * 800,
             "evidence": "E" * 800,
         }
-        with patch.object(lessons, "list_verified_lessons", return_value=[record] * 20):
-            response = await lessons.handle(None, {"action": "list", "repository": "owner/repo"})
+        with patch.object(lessons, "list_verified_lessons", return_value=[record] * 20), \
+             patch.object(lessons, "github_user_allowed", return_value=True):
+            response = await lessons.handle(
+                type("Event", (), {"author_id": 7})(),
+                {"action": "list", "repository": "owner/repo"},
+            )
         self.assertLessEqual(len(response), 2000)
         self.assertIn("Showing", response)
 

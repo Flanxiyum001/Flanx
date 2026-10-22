@@ -1,4 +1,4 @@
-"""Max free cloud sandbox + GitHub-hosted memory ("brain") layer.
+"""Flanx free cloud sandbox + GitHub-hosted memory ("brain") layer.
 
 Sandbox (OnlineCompiler.io free tier, verified against their docs):
 
@@ -6,36 +6,41 @@ Sandbox (OnlineCompiler.io free tier, verified against their docs):
     Authorization: <your api key>          # no "Bearer" prefix
     {"compiler": "python-3.14", "code": "...", "input": "..."}
 
-Documented free-plan limits: 100,000 runs/month, 30 submissions/minute,
-2 concurrent executions, 30s execution timeout, 100KB code and stdin each,
-64KB output per stream, and **no outbound network inside the sandbox**.
+The provider documents 30 submissions/minute, 2 concurrent executions,
+30s execution timeout, 100KB code and stdin each, 64KB output per stream,
+and **no outbound network inside the sandbox**. Check account quota via
+/api/usage/ because published monthly-limit pages have differed.
 
-The brain lives in ``brain_memory.txt`` inside the repository Max works on,
-so every lesson survives restarts and is reviewable in GitHub history.
+Legacy brain notes may exist in ``brain_memory.txt`` in a target
+repository. Automatic default-branch writes are disabled; persistence of
+lesson records is managed separately in SQLite.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 import requests
-from github import Github, GithubException, UnknownObjectException
+from github import Github, UnknownObjectException
+from repo_review import _redact_review_excerpt
 
 SANDBOX_BASE_URL = os.getenv("ONLINE_COMPILER_BASE_URL", "https://api.onlinecompiler.io").rstrip("/")
 SANDBOX_API_KEY = os.getenv("ONLINE_COMPILER_API_KEY")
 DEFAULT_COMPILER = os.getenv("SANDBOX_COMPILER", "python-3.14")
-HTTP_TIMEOUT_SECONDS = float(os.getenv("SANDBOX_HTTP_TIMEOUT", "60"))
+try:
+    HTTP_TIMEOUT_SECONDS = max(5.0, min(60.0, float(os.getenv("SANDBOX_HTTP_TIMEOUT", "45"))))
+except (TypeError, ValueError):
+    HTTP_TIMEOUT_SECONDS = 45.0
 
-MAX_CODE_BYTES = 100 * 1024  # provider limit for `code`
-MAX_STDIN_BYTES = 100 * 1024  # provider limit for `input`
+MAX_CODE_BYTES = 100_000  # documented UTF-8 encoded-byte limit
+MAX_STDIN_BYTES = 100_000
 
 BRAIN_FILE = "brain_memory.txt"
 BRAIN_HEADER = "# Max Core Memory Bank"
 BRAIN_MAX_CHARS = 12_000  # keep the diary small enough to fit a single prompt
-MEMORY_WRITES_ENABLED = False  # remote memory writes need scoped approval
 
 CLIP_DEFAULT = 1500
 PROMPT_CLIP = 4_000
@@ -98,34 +103,47 @@ class SandboxResult:
             return f"⚠️ {self.error}"
         if self.passed:
             timing = f" ({self.duration})" if self.duration else ""
-            body = clip(self.stdout) or "(no output)"
+            body = clip(self.stdout).replace("```", "'''") or "(no output)"
             return f"✅ Exit 0{timing}\n```\n{body}\n```"
-        body = clip(self.stderr or self.stdout or "(no output)")
+        body = clip(self.stderr or self.stdout or "(no output)").replace("```", "'''")
         return f"❌ Exit {self.exit_code}" + (f" ({self.duration})" if self.duration else "") + f"\n```\n{body}\n```"
 
 
 def _parse_response(data: dict) -> SandboxResult:
-    # Piston-compatible response shape nests everything under `run`.
-    if isinstance(data.get("run"), dict):
-        run = data["run"]
-        return SandboxResult(
-            ok=True,
-            exit_code=run.get("code"),
-            stdout=run.get("stdout") or "",
-            stderr=run.get("stderr") or "",
-            duration=str(run.get("cpu_time") or run.get("time") or ""),
-        )
-
-    # Native sync shape: {status, exit_code, output, error, time, total, memory, ...}
-    if data.get("exit_code") is None:
-        return SandboxResult(ok=False, error="Unexpected sandbox response shape.")
-
+    """Parse documented native/Piston formats; never echo raw upstream JSON."""
+    if not isinstance(data, dict):
+        return SandboxResult(ok=False, error="Sandbox returned an invalid response shape.")
+    if data.get("truncated") is True:
+        return SandboxResult(ok=False, error="Sandbox output was truncated; validation is inconclusive.")
+    run = data.get("run") if isinstance(data.get("run"), dict) else data
+    native = run is data
+    raw_code = run.get("exit_code") if native else run.get("code")
+    try:
+        if isinstance(raw_code, bool) or raw_code is None:
+            raise ValueError("missing exit status")
+        code = int(raw_code)
+        if not -255 <= code <= 255:
+            raise ValueError("invalid exit status")
+        if isinstance(raw_code, str) and str(code) != raw_code:
+            raise ValueError("invalid exit status")
+    except (ValueError, TypeError):
+        return SandboxResult(ok=False, error="Sandbox returned no valid exit code.")
+    status = data.get("status")
+    if status is not None and status not in {"success", "error"}:
+        return SandboxResult(ok=False, error="Sandbox returned an unknown execution status.")
+    if status == "error" and code == 0:
+        return SandboxResult(ok=False, error="Sandbox response had conflicting execution status.")
+    stdout = run.get("output", run.get("stdout", "")) if native else run.get("stdout", "")
+    stderr = run.get("error", run.get("stderr", "")) if native else run.get("stderr", "")
+    if not isinstance(stdout, str) or not isinstance(stderr, str):
+        return SandboxResult(ok=False, error="Sandbox returned malformed output fields.")
+    duration = run.get("time", run.get("cpu_time", ""))
     return SandboxResult(
         ok=True,
-        exit_code=int(data["exit_code"]),
-        stdout=data.get("output") or data.get("stdout") or "",
-        stderr=data.get("error") or data.get("stderr") or "",
-        duration=str(data.get("time") or ""),
+        exit_code=code,
+        stdout=clip(stdout, 64_000),
+        stderr=clip(stderr, 64_000),
+        duration=str(duration or "")[:32],
     )
 
 
@@ -139,6 +157,10 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
                 "(or Settings → Environment) so sandbox validation can run."
             ),
         )
+    if not isinstance(code, str) or not isinstance(stdin, str):
+        return SandboxResult(ok=False, error="Sandbox code and input must be text.")
+    if "\x00" in code or "\x00" in stdin:
+        return SandboxResult(ok=False, error="Sandbox code and input cannot contain NUL bytes.")
     if len(code.encode("utf-8")) > MAX_CODE_BYTES:
         return SandboxResult(ok=False, error="Code exceeds the sandbox's 100KB limit.")
     if len(stdin.encode("utf-8")) > MAX_STDIN_BYTES:
@@ -154,7 +176,7 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
     except requests.Timeout:
         return SandboxResult(ok=False, error=f"Sandbox did not respond within {HTTP_TIMEOUT_SECONDS:.0f}s.")
     except requests.RequestException:
-        return SandboxResult(ok=False, error="Could not reach the sandbox API.")
+        return SandboxResult(ok=False, error="Could not connect to the sandbox API. No execution was confirmed.")
 
     if response.status_code == 401 or response.status_code == 403:
         return SandboxResult(ok=False, error="Sandbox rejected the API key (HTTP "
@@ -162,29 +184,28 @@ def run_code(code: str, stdin: str = "", compiler: str = DEFAULT_COMPILER) -> Sa
     if response.status_code == 429:
         return SandboxResult(
             ok=False,
-            error="Sandbox rate limit or monthly free-quota reached (HTTP 429). "
-                  "Free plan: 30 submissions/min, 100k runs/month.",
+            error="Sandbox returned HTTP 429 (rate limit, concurrency, or account quota). "
+                  "Check the provider's /api/usage/ and /api/limits/ endpoints.",
         )
     if response.status_code != 200:
-        # The API reports bad/expired keys with 404 + {"error": "Invalid or inactive API key"}.
-        if "api key" in response.text.lower():
-            return SandboxResult(
-                ok=False,
-                error=(
-                    "Sandbox rejected ONLINE_COMPILER_API_KEY "
-                    f"(HTTP {response.status_code}) — generate a REST key on the "
-                    "OnlineCompiler.io dashboard's API Keys page."
-                ),
-            )
-        return SandboxResult(ok=False, error=f"Sandbox API returned HTTP {response.status_code}.")
+        if response.status_code in {404, 405}:
+            detail = "Check the documented /api/run-code-sync/ endpoint and REST API key."
+        elif response.status_code in {400, 413, 415, 422}:
+            detail = "Check the compiler ID and submitted code/input limits."
+        elif response.status_code >= 500:
+            detail = "The provider may be temporarily unavailable."
+        else:
+            detail = "Check the configured API endpoint and account limits."
+        return SandboxResult(
+            ok=False,
+            error=f"Sandbox API returned HTTP {response.status_code}. {detail}",
+        )
 
     try:
         data = response.json()
     except ValueError:
         return SandboxResult(ok=False, error="Sandbox API returned a non-JSON response.")
 
-    if not isinstance(data, dict):
-        return SandboxResult(ok=False, error="Unexpected sandbox payload shape.")
     return _parse_response(data)
 
 
@@ -218,18 +239,23 @@ def _trim_brain(content: str) -> str:
 
 
 def read_flanx_brain(repo_name: str, ref: str = "main") -> str:
-    """Read Max's historical memory log from GitHub."""
+    """Read Flanx's historical memory log from GitHub."""
     try:
         repo = _client().get_repo(repo_name)
+        if repo.private:
+            return (
+                "Private repository memory is not displayed in Discord by default. "
+                "No memory file contents were retrieved."
+            )
         file_obj = repo.get_contents(BRAIN_FILE, ref=ref)
         content = file_obj.decoded_content.decode("utf-8", errors="replace")
         if len(content) > BRAIN_MAX_CHARS:
             content = "…[older memories trimmed]…" + content[-BRAIN_MAX_CHARS:]
-        return content
+        return _redact_review_excerpt(content)
     except UnknownObjectException:
-        return "No repository memory found yet."
+        return "No memory file found on that branch; historical existence is unknown."
     except Exception:  # never let memory trouble kill a run
-        return "Repository memory unavailable right now."
+        return "Memory unavailable; GitHub access or file retrieval failed."
 
 
 def update_flanx_brain(
@@ -238,50 +264,5 @@ def update_flanx_brain(
     ref: str = "main",
     max_retries: int = 3,
 ) -> bool:
-    """Append a timestamped lesson to ``brain_memory.txt`` on the target branch."""
-    if not MEMORY_WRITES_ENABLED:
-        return False
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    entry = f"- [{stamp}] {new_insight}"
-    try:
-        repo = _client().get_repo(repo_name)
-    except Exception:
-        print("⚠️ Brain update warning (repo unavailable).")
-        return False
-
-    for attempt in range(max_retries):
-        try:
-            try:
-                file_obj = repo.get_contents(BRAIN_FILE, ref=ref)
-                current = file_obj.decoded_content.decode("utf-8", errors="replace")
-                sha: Optional[str] = file_obj.sha
-            except UnknownObjectException:
-                current, sha = f"{BRAIN_HEADER}\n", None
-
-            updated = _trim_brain(f"{current.rstrip()}\n{entry}\n")
-            if sha:
-                repo.update_file(
-                    BRAIN_FILE,
-                    "🤖 Max memory updated.",
-                    updated,
-                    sha,
-                    branch=ref,
-                )
-            else:
-                repo.create_file(
-                    BRAIN_FILE,
-                    "🤖 Max brain initialization.",
-                    updated,
-                    branch=ref,
-                )
-            print("🧠 Max wrote a lesson to its memory layer.")
-            return True
-        except GithubException as exc:
-            if exc.status == 409 and attempt < max_retries - 1:
-                continue  # concurrent write, refetch and retry
-            print(f"⚠️ Brain update warning (HTTP {exc.status}).")
-            return False
-        except Exception:
-            print("⚠️ Brain update warning (write failed).")
-            return False
+    """Remote memory writes are unavailable until covered by scoped approval."""
     return False

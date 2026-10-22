@@ -151,7 +151,7 @@ class SpecialistRegistry:
 class ScopedWorkspace:
     """Copy explicitly selected text files; never edit the source tree."""
 
-    def __init__(self, source: Path, editable: tuple[str, ...], support: tuple[str, ...] = ()): 
+    def __init__(self, source: Path, editable: tuple[str, ...], support: tuple[str, ...] = ()):
         if not source.is_dir() or not 1 <= len(editable) <= MAX_FILES or len(support) > 24:
             raise ValueError("A scoped source workspace is required")
         self.source = source.resolve(strict=True)
