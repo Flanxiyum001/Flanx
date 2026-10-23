@@ -39,6 +39,11 @@ _MUTATION_VERBS = {"DELETE", "REMOVE", "SEND", "POST", "PUBLISH", "CREATE", "UPD
                    "REVOKE", "GRANT", "TRANSFER", "INVITE", "ADD"}
 _TOOLKIT = re.compile(r"[a-z][a-z0-9_]{1,63}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{3,120}\Z")
+_GITHUB_ACCOUNT_READS = frozenset({
+    "GITHUB_WHO_AM_I", "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER",
+    "GITHUB_LIST_ACCESSIBLE_REPOSITORIES",
+    "GITHUB_LIST_REPOSITORIES_ACCESSIBLE_TO_THE_APP_INSTALLATION",
+})
 
 
 def _user_id(requester_id: int | str) -> str:
@@ -104,6 +109,14 @@ class CapabilityPolicy:
         ):
             raise ValueError("Invalid connection policy")
         self.connections = dict(configured)
+        repositories = document.get("github_repository_allowlist", [])
+        if (not isinstance(repositories, list) or any(
+            not isinstance(name, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,39}/[A-Za-z0-9_.-]{1,100}", name)
+            for name in repositories
+        )):
+            raise ValueError("Invalid GitHub repository allowlist")
+        self.github_repository_allowlist = frozenset(repositories)
         self.actions: dict[tuple[str, str], Action] = {}
         for entry in document.get("actions", []):
             if not isinstance(entry, dict) or set(entry) != {
@@ -120,7 +133,8 @@ class CapabilityPolicy:
                 raise ValueError("Invalid action policy entry")
             action = Action(**entry)
             words = set(action.slug.split("_"))
-            if action.risk == "read" and (not words.intersection(_READ_VERBS)
+            if action.risk == "read" and (not (words.intersection(_READ_VERBS)
+                                               or action.slug == "GITHUB_WHO_AM_I")
                                           or words.intersection(_MUTATION_VERBS)):
                 raise ValueError("Read classification conflicts with action name")
             key = (action.account_id, action.slug)
@@ -149,6 +163,19 @@ class CapabilityPolicy:
         if action.risk == "read":
             return action, "composio.read"
         return action, "composio.write"
+
+    def check_repository_scope(self, action: Action, arguments: dict) -> None:
+        """GitHub actions outside the account inventory need an exact repo grant."""
+        if action.toolkit != "github" or action.slug in _GITHUB_ACCOUNT_READS:
+            return
+        if not isinstance(arguments, dict):
+            raise IntegrationError("permission_denied")
+        if isinstance(arguments.get("owner"), str) and isinstance(arguments.get("repo"), str):
+            name = f"{arguments['owner']}/{arguments['repo']}"
+        else:
+            name = arguments.get("full_name") or arguments.get("repository") or arguments.get("repo")
+        if not isinstance(name, str) or name not in self.github_repository_allowlist:
+            raise IntegrationError("permission_denied")
 
 
 def _validate(value: Any, schema: dict, depth: int = 0) -> bool:
@@ -367,6 +394,7 @@ class ComposioAdapter:
     async def execute(self, account_id: str, slug: str, arguments: dict) -> tuple[dict, Any]:
         metadata = await self.discover(account_id, slug)
         action = metadata["action"]
+        self.policy.check_repository_scope(action, arguments)
         if (not isinstance(arguments, dict) or len(json.dumps(arguments, allow_nan=False)) > 32_000
                 or not _validate(arguments, metadata["schema"])):
             raise IntegrationError("invalid_arguments")

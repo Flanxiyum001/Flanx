@@ -37,8 +37,10 @@ accounts or increasing volume. No paid plan is assumed by Max.
 4. Put `COMPOSIO_API_KEY` in the private process environment. Set
    `MAX_COMPOSIO_POLICY_FILE` to the policy path,
    `MAX_COMPOSIO_ENABLED=true`, and `MAX_EXTERNAL_ACTIONS_DISABLED=false`.
-   Set `MAX_APPROVER_DISCORD_IDS` to the exact Discord IDs allowed to operate
-   the commands. Do not store keys in the policy file or Discord messages.
+   Set `MAX_OWNER_DISCORD_IDS` to the exact Discord IDs allowed to operate
+   owner commands. `MAX_APPROVER_DISCORD_IDS` remains the publishing approval
+   list and is used for owner commands only when `MAX_OWNER_DISCORD_IDS` is
+   absent. Do not store keys in the policy file or Discord messages.
 5. In a DM to the test bot, run `!max_capabilities`, then run a configured
    read action with `!max_tool <account_id> <SLUG> {"required_arg":"value"}`.
    Result content is marked untrusted and delivered by DM with basic redaction.
@@ -63,7 +65,7 @@ toolkit slugs to existing Composio auth config IDs, for example `github` and
 `googlecalendar`. The example policy shows the shape. Max checks that the
 auth config belongs to the requested toolkit. Set `COMPOSIO_API_KEY`,
 `MAX_COMPOSIO_ENABLED=true`, `MAX_EXTERNAL_ACTIONS_DISABLED=false`, and
-`MAX_APPROVER_DISCORD_IDS` to trusted Discord user IDs. The policy and SDK
+`MAX_OWNER_DISCORD_IDS` to trusted Discord user IDs. The policy and SDK
 must be available at startup. No connection is created when they are missing.
 
 An authorized owner can write `Max, connect to GitHub`, `Max, connect to Google
@@ -82,6 +84,48 @@ available, and action categories explicitly configured for that account.
 Connecting does not add actions to the policy or run them. `!max_tool` retains
 the action allowlist and per-write approval. With multiple accounts for one
 toolkit, use the exact account ID from `!max_connections`; Max will not guess.
+
+`Max, which repositories do you have access to?` or `!max_github_repos`
+creates an owner-only, read-only GitHub visibility report by DM. Add
+`GITHUB_WHO_AM_I` and `GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER`
+as separate read entries for the active connected account, with exact live
+versions from tool discovery. The list action may instead be one of the
+supported app-installation repository list actions. Max validates the live
+schema and arguments before each read and uses the external action task path.
+The report separates the API identity, visible repositories, and the
+intersection with `github_repository_allowlist` in the policy. This allowlist
+defaults to empty and is enforced for other repository-scoped Composio GitHub
+actions. Those actions need an exact `owner` and `repo`, `full_name`, or
+`repository` argument matching the allowlist; actions without a resolvable
+repository are denied. Only permission flags actually returned for each
+repository are shown. Visibility does not authorize writes. Configure
+`MAX_GITHUB_ALLOWED_USER_IDS` and `MAX_OWNER_DISCORD_IDS` for the same
+trusted Discord owner. No GitHub names, permissions, or account login are
+inferred when a connection, action, or API field is absent.
+This allowlist governs Composio GitHub actions; the separate `GITHUB_TOKEN`
+repository workflows retain their existing GitHub operator gate and token
+permissions.
+
+### Owner configuration and diagnostics
+
+Discord supplies `message.author.id` as an integer. Max never accepts an ID
+claimed in message text. Connection management, Composio admin commands,
+external action approval, memory admin commands, and `!max_inference_status`
+use the same owner check. Set `MAX_OWNER_DISCORD_IDS` to unique,
+comma-separated numeric IDs in the running bot's private Railway variables.
+If this variable is absent, Max uses `MAX_APPROVER_DISCORD_IDS` for these
+commands for compatibility. An explicitly empty or malformed owner variable
+does not fall back. Publishing approval still requires its separate
+`MAX_APPROVER_DISCORD_IDS`; GitHub repository operations also require
+`MAX_GITHUB_ALLOWED_USER_IDS`. A missing list, malformed list, or requester
+outside the list gives a distinct safe diagnostic without exposing IDs.
+Changes to Railway variables require a bot restart or redeployment before the
+running process can use them; `.env.example` does not configure Railway.
+
+To copy your own Discord user ID, enable Developer Mode under **User Settings
+→ Advanced**, then right-click your user in a DM or server and choose **Copy
+User ID**. Paste the number into private Railway variables, not a Discord
+message or repository file. See [Discord's ID guide](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID).
 
 ## Policy and limits
 
@@ -130,8 +174,9 @@ provider. For the Railway-hosted FreeLLM service, keep its existing private
 `AI_BASE_URL` ending in the OpenAI-compatible API base path (usually `/v1`),
 set `AI_API_KEY`, `AI_MODEL=auto`, `MAX_INFERENCE_PROVIDER=freellm`, and
 `MAX_INFERENCE_POLICY=cloud_allowed`. `cloud` remains a compatibility alias
-for `freellm`. Discord chat is classified as `private_repo`, so it also needs
-`MAX_ALLOW_CLOUD_PRIVATE_REPO=true` after the owner approves that data flow.
+for `freellm`. Ordinary Discord chat is classified as `chat`, so it also needs
+`MAX_ALLOW_CLOUD_CHAT=true` after the owner approves that data flow. Pasted
+repository context uses `private_repo` and needs its own specific opt-in.
 Repair prompts include `source` and `memory` and require both
 `MAX_ALLOW_CLOUD_SOURCE=true` and `MAX_ALLOW_CLOUD_MEMORY=true` (or the broad
 `MAX_ALLOW_CLOUD_PRIVATE_CONTEXT=true` opt-in). The bot never infers cloud
@@ -139,20 +184,21 @@ consent from the URL or API key.
 `MAX_INFERENCE_PROVIDER=auto` prefers Ollama and uses FreeLLM after a local
 failure only when `MAX_AUTO_CLOUD_FALLBACK=true`, the cloud policy is enabled,
 and the request's data classes allow it. Private chat, source, and memory
-remain blocked unless the corresponding existing cloud privacy options grant
-them. The router reports provider-specific missing key, disabled policy,
+remain blocked unless the corresponding cloud privacy options grant them.
+Credential and authentication material stays blocked for every cloud class.
+The router reports provider-specific missing key, disabled policy,
 connection, timeout, rate limit, request rejection, and invalid response
 errors without echoing provider bodies or credentials. It logs provider,
-task name, and data classes only; task descriptions contain the selected route.
+request ID, final status, fallback flags, and safe error category only.
 If chat says Ollama is unavailable, verify `MAX_INFERENCE_PROVIDER` first:
 leaving it unset selects local Ollama even when `AI_BASE_URL` is configured.
 Check `AI_BASE_URL` and `AI_MODEL` privately against the deployed FreeLLM
 service. No live provider call is part of the offline tests.
 
 FreeLLM is only used when its provider and per-data-class privacy options are configured.
-Cloud requests now also redact common credential labels, token prefixes, and
-private-key blocks before transmission. Redaction is a backup control, not a
-guarantee against every secret format. Composio results are not passed to
+Cloud requests are blocked when credential redaction detects common credential
+labels, token prefixes, or private-key blocks. Detection cannot guarantee
+coverage of every secret format. Composio results are not passed to
 either model automatically.
 Existing `CodingWorkflow` still prepares an isolated temporary diff, runs its
 bounded review and compile check, and returns a report. It does not apply its

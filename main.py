@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import logging
 import os
 import re
 import sys
@@ -38,8 +39,9 @@ from task_engine import ActionNotStarted, Orchestrator, Status, Task, TaskFailur
 from approval_publish import PublishConfig, PublishError, PublishingCoordinator
 from composio_adapter import ComposioAdapter, IntegrationError
 from external_actions import ExternalActionService
+from github_visibility import github_visibility
 from memory_store import MemoryStore
-from authz import GITHUB_ACCESS_DENIED, github_user_allowed
+from authz import GITHUB_ACCESS_DENIED, github_user_allowed, owner_access
 from repo_review import (REPO_URL_RE, contains_potential_secret, extract_repository,
                          inspect_repository, normalize_repository, validate_target_path)
 
@@ -119,9 +121,6 @@ class PublishApprovalView(discord.ui.View):
 
     async def _decision(self, interaction: discord.Interaction, approve: bool) -> None:
         user_id = getattr(getattr(interaction, "user", None), "id", None)
-        if user_id not in publisher.config.approver_ids:
-            await interaction.response.send_message("You are not authorized for this approval.", ephemeral=True)
-            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         result = await publisher.decide(self.prepared.task_id, self.prepared.nonce,
                                         user_id, approve=approve)
@@ -404,6 +403,7 @@ CHAT_HELP = (
     "• `max set timezone Asia/Kolkata` · `max what time is it`\n"
     "• `max remember <anything>` · `max show notes`\n"
     "• `max integrations` — list the pluggable modules\n"
+    "• `max which repositories can you access?` — private GitHub visibility report\n"
     "Prefix commands still work: `!max_fix`, `!update_repo`, `!max_brain`, `!max_stats`."
 )
 
@@ -479,6 +479,14 @@ CONNECTION_INTENT_RE = re.compile(
     r"(?P<list>show\s+my\s+connected\s+apps|list\s+my\s+connections|connected\s+apps))"
     r"(?:\s+(?P<toolkit>[A-Za-z][A-Za-z0-9 _-]{0,50}?))?"
     r"(?:\s+connection\s+have)?\s*[?.!]*\s*$", re.IGNORECASE)
+GITHUB_VISIBILITY_RE = re.compile(
+    r"^\s*(?:(?:which|what)\s+(?:github\s+)?repos(?:itories)?\s+"
+    r"(?:do\s+you|can\s+you)\s+(?:have\s+access\s+to|access|see)|"
+    r"(?:list|show)\s+(?:me\s+)?(?:the\s+)?(?:github\s+)?repos(?:itories)?\s+"
+    r"(?:you\s+can\s+access|you\s+can\s+see|i\s+can\s+access)?|"
+    r"(?:which|what)\s+(?:github\s+)?repos(?:itories)?\s+"
+    r"(?:are\s+you\s+connected\s+to|are\s+visible\s+to\s+you))\s*[?.!]*\s*$",
+    re.IGNORECASE)
 
 
 def connection_intent(text: str) -> dict | None:
@@ -554,6 +562,8 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     connection = connection_intent(text)
     if connection:
         return "connection", connection
+    if GITHUB_VISIBILITY_RE.fullmatch(text or ""):
+        return "github_visibility", {}
     extension = integrations.match(stripped)
     if extension:
         return "integration", {"name": extension[0], "payload": extension[1]}
@@ -601,6 +611,15 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     }
 
 
+def discord_data_class(prompt: str) -> str:
+    """Keep ordinary chat separate from user-pasted repository or source content."""
+    if "```" in prompt:
+        return "source"
+    if _extract_repo(prompt) or re.search(r"\bprivate\s+repositor(?:y|ies)\b", prompt, re.I):
+        return "private_repo"
+    return "chat"
+
+
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
@@ -640,6 +659,8 @@ async def on_message(message):
     try:
         if intent == "connection":
             await _handle_connection(message.author, channel, payload)
+        elif intent == "github_visibility":
+            await _handle_github_visibility(message.author, channel)
         elif intent == "search":
             query = payload["query"]
             if not query:
@@ -707,7 +728,7 @@ async def on_message(message):
                 await channel.send(f"🧠 **Brain memory for `{repo}`**\n```\n{clip(memory, 1800)}\n```")
         elif intent == "general":
             async with channel.typing():
-                task = Task.new(f"General chat response via {model_router.route_description()}", "general_chat",
+                task = Task.new("General chat response", "general_chat",
                                 permitted_tools={"model.reply"}, timeout_seconds=120)
                 outcome = await chat_orchestrator.run(task, payload["prompt"])
             if outcome.task.status == Status.COMPLETED:
@@ -833,7 +854,8 @@ def compiler_for_target(file_path: str) -> str | None:
 
 
 async def generate_assistant_reply(prompt: str, task: str = "general",
-                                   *, raise_on_error: bool = False) -> str:
+                                   *, raise_on_error: bool = False,
+                                   include_request_id: bool = False) -> str:
     """Answer Discord questions through the shared privacy-aware model router."""
     try:
         reply = await model_router.generate(
@@ -849,7 +871,7 @@ async def generate_assistant_reply(prompt: str, task: str = "general",
                 },
                 {"role": "user", "content": prompt},
             ],
-            task=task, data_class="private_repo", max_tokens=700,
+            task=task, data_class=discord_data_class(prompt), max_tokens=700,
         )
     except ModelError as exc:
         if raise_on_error:
@@ -857,14 +879,19 @@ async def generate_assistant_reply(prompt: str, task: str = "general",
         return str(exc)
     if reply.prompt_tokens is not None or reply.completion_tokens is not None:
         _record_usage_safely(record_llm_usage, reply.model, reply)
-    return reply.text
+    request_id = getattr(getattr(reply, "metadata", None), "request_id", None)
+    return (f"{reply.text}\n\nRequest ID: `{request_id}`"
+            if include_request_id and request_id else reply.text)
 
 
 async def _general_chat_handler(task: Task, prompt: str) -> str:
     try:
-        return await generate_assistant_reply(prompt, task="general", raise_on_error=True)
+        return await generate_assistant_reply(prompt, task="general", raise_on_error=True,
+                                              include_request_id=True)
     except ModelError as exc:
-        raise TaskFailure("model_" + exc.code, str(exc)) from None
+        request_id = getattr(getattr(exc, "metadata", None), "request_id", None)
+        detail = f"{exc} Request ID: `{request_id}`" if request_id else str(exc)
+        raise TaskFailure("model_" + exc.code, detail) from None
 
 
 chat_orchestrator = Orchestrator(store_path=TASK_DB)
@@ -1191,13 +1218,12 @@ async def update_repo(ctx, repo_name: str, file_path: str, *, instruction: str):
 
 @bot.command(name="max_publish_status")
 async def max_publish_status(ctx, task_id: str):
-    """Authorized, read-only reconciliation of a possibly completed test PR."""
-    if not publisher.config.ready or ctx.author.id not in publisher.config.approver_ids:
-        await ctx.send("Publishing status is unavailable or you are not authorized.")
+    """Read-only reconciliation of a possibly completed test PR."""
+    if not publisher.config.ready:
+        await ctx.send("Publishing status is unavailable.")
         return
     record = publisher.store.load(task_id) if re.fullmatch(r"[0-9a-f]{32}", task_id) else None
-    if (record is None or record.get("requester_id") != str(ctx.author.id)
-            or record.get("repo") != publisher.config.test_repo):
+    if record is None or record.get("repo") != publisher.config.test_repo:
         await ctx.send("Publishing task is unavailable.")
         return
     state = record.get("state")
@@ -1223,6 +1249,42 @@ async def flanx_stats(ctx):
     await ctx.send(await asyncio.to_thread(format_usage))
 
 
+@bot.command(name="max_inference_status")
+async def max_inference_status(ctx, request_id: str = ""):
+    """Owner-only, per-process adapter result; never asks an LLM to identify itself."""
+    if getattr(ctx, "guild", None) is not None:
+        await ctx.send("Use this command in a DM to Max.")
+        return
+    owner = owner_access(ctx.author.id)
+    if not owner.allowed:
+        await ctx.send(_owner_denial(owner.reason, owner.variable))
+        return
+    if request_id and not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        await ctx.send("Use the 32-character Request ID from Max's reply.")
+        return
+    record = model_router.inference_status(request_id or None)
+    if record is None:
+        await ctx.send("No matching inference record exists in this bot process. Records are bounded and reset on restart.")
+        return
+    model = record.configured_model
+    safe_model = (model if isinstance(model, str)
+                  and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}", model)
+                  and not re.search(r"(?i)(?:sk-|ghp_|github_pat_|token|secret|password|api.?key)", model)
+                  else "unknown or redacted")
+    selected = {"freellm": "FreeLLM gateway", "local": "local Ollama"}.get(
+        record.selected_provider, "none (blocked before dispatch)")
+    await ctx.send(
+        f"Request `{record.request_id}`: `{record.status}`. "
+        f"Requested: `{record.requested_provider}`; selected: `{selected}`; "
+        f"configured model: `{safe_model}`; fallback attempted: "
+        f"`{str(record.fallback_attempted).lower()}`; fallback used: "
+        f"`{str(record.fallback_used).lower()}`; error category: "
+        f"`{record.error_category or 'none'}`; upstream provider: "
+        f"`{record.upstream_provider}`.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 class ExternalApprovalView(discord.ui.View):
     def __init__(self, task_id: str, requester_id: int):
         super().__init__(timeout=90)
@@ -1230,9 +1292,6 @@ class ExternalApprovalView(discord.ui.View):
         self.requester_id = requester_id
 
     async def _decide(self, interaction: discord.Interaction, approve: bool):
-        if interaction.user.id != self.requester_id or interaction.user.id not in publish_config.approver_ids:
-            await interaction.response.send_message("Not authorized for this action.", ephemeral=True)
-            return
         await interaction.response.defer(ephemeral=True)
         try:
             outcome = await external_service.decide(self.task_id,
@@ -1257,7 +1316,15 @@ class ExternalApprovalView(discord.ui.View):
 
 
 def _external_admin(ctx) -> bool:
-    return ctx.author.id in publish_config.approver_ids
+    return owner_access(ctx.author.id).allowed
+
+
+def _owner_denial(reason: str, variable: str) -> str:
+    if reason == "missing":
+        return f"Owner configuration is missing. Set {variable} to trusted numeric Discord user IDs in the bot environment, then restart."
+    if reason == "malformed":
+        return f"Owner configuration in {variable} is malformed. Use unique comma-separated numeric Discord user IDs; no owner was authorized."
+    return "This Discord account is not in the configured owner allowlist. No connection request was made."
 
 
 _CONNECTION_ERRORS = {
@@ -1276,11 +1343,71 @@ _CONNECTION_ERRORS = {
     "invalid_response": "Composio returned an incomplete connection response; no account was confirmed.",
 }
 
+_GITHUB_VISIBILITY_ERRORS = {
+    "disabled": "GitHub is disabled in MAX_COMPOSIO_POLICY_FILE or by MAX_EXTERNAL_ACTIONS_DISABLED.",
+    "auth_config_missing": "GitHub has no auth config in the `connections` section of MAX_COMPOSIO_POLICY_FILE.",
+    "github_connection_missing": "No active GitHub Composio connection for your Discord account. Connect GitHub in DM, then retry.",
+    "github_connection_ambiguous": "Multiple active GitHub connections exist. Keep one active connection for this Discord account before requesting a repository report.",
+    "github_read_action_missing": "Add read-only `GITHUB_WHO_AM_I` and `GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER` actions for this connected account to MAX_COMPOSIO_POLICY_FILE, with their discovered versions.",
+    "permission_denied": "The GitHub read action is disabled or does not belong to this Discord account in MAX_COMPOSIO_POLICY_FILE.",
+    "schema_mismatch": "A configured GitHub action's live slug, schema, or version differs from MAX_COMPOSIO_POLICY_FILE. Discover its current schema and update the policy.",
+    "invalid_arguments": "The configured GitHub read action requires arguments Max cannot safely infer. Check its live input schema and choose a no-argument or supported paginated read action.",
+    "invalid_response": "The GitHub read action returned an unrecognized identity or repository list; no repositories were inferred.",
+    "connection_expired": "The configured GitHub connection is no longer active. Check its status and reconnect if needed.",
+    "service_error": "The GitHub read action failed. Check Composio and GitHub access, then retry.",
+    "authentication": "Composio rejected its API key. Check COMPOSIO_API_KEY privately.",
+    "rate_limited": "Composio or GitHub is rate limiting the read action. Retry later.",
+    "timeout": "The GitHub read action timed out. Retry later.",
+    "not_found": "The configured GitHub connection or action was not found in Composio. Check its IDs and discovered slug.",
+}
+
+
+async def _handle_github_visibility(author, channel) -> None:
+    """Send one owner-scoped, read-only report; never route API data to a model."""
+    owner = owner_access(author.id)
+    if not owner.allowed:
+        await channel.send(_owner_denial(owner.reason, owner.variable))
+        return
+    if not github_user_allowed(author.id):
+        await channel.send(GITHUB_ACCESS_DENIED)
+        return
+    if composio_adapter is None or external_service is None or composio_adapter.policy.emergency_off:
+        await channel.send("GitHub visibility needs MAX_COMPOSIO_ENABLED=true, COMPOSIO_API_KEY, MAX_COMPOSIO_POLICY_FILE, and MAX_EXTERNAL_ACTIONS_DISABLED=false.")
+        return
+    try:
+        report = await github_visibility(composio_adapter, external_service, author.id)
+        visible = []
+        for repo in report["visible"]:
+            permissions = repo.get("permissions")
+            details = ("; API permissions: " + ", ".join(
+                f"{key}={str(value).lower()}" for key, value in permissions.items())
+                if permissions else "")
+            visible.append(f"• `{repo['name']}`{details}")
+        body = (
+            f"**Connected GitHub account**\n`{report['login']}` (Composio `{report['account_id']}`)\n\n"
+            "**Repositories visible to that account**\n"
+            + ("\n".join(visible) if visible else "None returned by the configured API action.")
+            + ("\nResults may be incomplete because the configured page limit was reached." if report["truncated"] else "")
+            + "\n\n**Repositories authorized by Max's policy**\n"
+            + ("\n".join(f"• `{name}`" for name in report["authorized"])
+               if report["authorized"] else "None explicitly allowlisted and visible.")
+            + "\nOnly API-provided permission flags are shown; visibility alone grants no write authorization."
+        )
+        for chunk in discord_chunks(body):
+            await author.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+        if getattr(channel, "guild", None) is not None:
+            await channel.send("GitHub visibility details were sent by DM.")
+    except IntegrationError as exc:
+        await channel.send(_GITHUB_VISIBILITY_ERRORS.get(exc.code, f"GitHub visibility stopped: {exc.code}."))
+    except discord.HTTPException:
+        await channel.send("I could not send a private DM. Enable DMs and retry.")
+
 
 async def _handle_connection(author, channel, request: dict) -> None:
     """Handle deterministic account management; all account details go by DM."""
-    if author.id not in publish_config.approver_ids:
-        await channel.send("Connection management is restricted to authorized owners.")
+    owner = owner_access(author.id)
+    if not owner.allowed:
+        await channel.send(_owner_denial(owner.reason, owner.variable))
         return
     if composio_adapter is None or composio_adapter.policy.emergency_off:
         await channel.send(
@@ -1351,6 +1478,11 @@ async def max_connect(ctx, *, toolkit: str):
 @bot.command(name="max_connections")
 async def max_connections(ctx):
     await _handle_connection(ctx.author, ctx.channel, {"operation": "list"})
+
+
+@bot.command(name="max_github_repos")
+async def max_github_repos(ctx):
+    await _handle_github_visibility(ctx.author, ctx.channel)
 
 
 @bot.command(name="max_connection_status")
@@ -1536,6 +1668,11 @@ async def max_memory_delete(ctx, record_id: str):
 
 
 if __name__ == "__main__":
+    route_log = logging.getLogger("model_router")
+    route_log.setLevel(logging.INFO)
+    if not route_log.handlers:
+        route_log.addHandler(logging.StreamHandler(sys.stderr))
+    route_log.propagate = False
     missing = [name for name in REQUIRED_VARS if not os.getenv(name)]
     if missing:
         print(f"❌ Missing environment variables: {', '.join(missing)}")

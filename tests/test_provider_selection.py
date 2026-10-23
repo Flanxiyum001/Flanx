@@ -30,7 +30,13 @@ class ProviderSelectionTests(unittest.IsolatedAsyncioTestCase):
         local = SimpleNamespace(post=AsyncMock(side_effect=OSError("Ollama offline")))
         router = ModelRouter(environ={**BASE, "MAX_INFERENCE_PROVIDER": "freellm"},
                              local_client=local, cloud_client=cloud)
-        reply = await router.generate(MESSAGES, data_class="general")
+        with self.assertRaises(ModelError) as blocked:
+            await router.generate(MESSAGES, data_class="chat")
+        self.assertEqual(blocked.exception.code, "privacy_blocked")
+        router = ModelRouter(environ={**BASE, "MAX_INFERENCE_PROVIDER": "freellm",
+                                     "MAX_ALLOW_CLOUD_CHAT": "true"},
+                             local_client=local, cloud_client=cloud)
+        reply = await router.generate(MESSAGES, data_class="chat")
         self.assertEqual((reply.text, reply.provider), ("FreeLLM answer", "freellm"))
         self.assertEqual(create.call_args.kwargs["model"], "auto")
         local.post.assert_not_called()
@@ -87,14 +93,27 @@ class ProviderSelectionTests(unittest.IsolatedAsyncioTestCase):
         create.assert_not_called()
         router = ModelRouter(environ={**BASE, "MAX_INFERENCE_PROVIDER": "freellm",
                                      "MAX_ALLOW_CLOUD_SOURCE": "true"}, cloud_client=cloud)
-        await router.generate([{"role": "user", "content": "api_key=private-value"}],
-                              data_class="source")
-        self.assertNotIn("private-value", str(create.call_args.kwargs["messages"]))
-        chat_router = ModelRouter(environ={**BASE, "MAX_INFERENCE_PROVIDER": "freellm",
-                                          "MAX_ALLOW_CLOUD_PRIVATE_REPO": "true"},
-                                  cloud_client=cloud)
-        self.assertEqual((await chat_router.generate(MESSAGES, data_class="private_repo")).provider,
+        with self.assertRaises(ModelError) as caught:
+            await router.generate([{"role": "user", "content": "api_key=private-value"}],
+                                  data_class="source")
+        self.assertEqual(caught.exception.code, "privacy_blocked")
+        self.assertIn("Credentials", str(caught.exception))
+        create.assert_not_called()
+        private_router = ModelRouter(environ={**BASE, "MAX_INFERENCE_PROVIDER": "freellm",
+                                             "MAX_ALLOW_CLOUD_PRIVATE_REPO": "true"},
+                                     cloud_client=cloud)
+        self.assertEqual((await private_router.generate(MESSAGES, data_class="private_repo")).provider,
                          "freellm")
+        with self.assertRaises(ModelError):
+            await private_router.generate(MESSAGES, data_class="chat")
+        for secret in ("password=synthetic-secret", "Bearer synthetic-token-12345",
+                       "ghp_abcdefghijklmno1234", "AI_API_KEY=synthetic-secret",
+                       '{"access_token":"synthetic-secret"}',
+                       "my password is synthetic-secret"):
+            with self.subTest(secret=secret), self.assertRaises(ModelError):
+                await private_router.generate([{"role": "user", "content": secret}],
+                                              data_class="private_repo")
+        self.assertEqual(create.await_count, 1)
 
     async def test_configuration_and_both_provider_failures_are_specific(self):
         no_key = ModelRouter(environ={"MAX_INFERENCE_PROVIDER": "freellm",

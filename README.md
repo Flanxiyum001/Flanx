@@ -216,8 +216,10 @@ Set these in Railway → Variables (or Freebuff Settings → Environment):
 | `AI_RETRY_MODEL` | no | second model used for retries; unset = same model at temperature 0 |
 | `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT` | no | default false; explicit opt-in for the remote repository repair workflow |
 | `MAX_GITHUB_ALLOWED_USER_IDS` | for GitHub features | comma-separated Discord user IDs allowed to inspect or prepare repository operations; absent or malformed list denies access |
+| `MAX_OWNER_DISCORD_IDS` | for owner commands | comma-separated Discord user IDs for Composio, external actions, memory admin, and inference diagnostics; falls back to `MAX_APPROVER_DISCORD_IDS` only when unset |
 | `MAX_INFERENCE_PROVIDER` | no | `local` (default), `freellm`, or `auto`; `cloud` is a compatibility alias |
 | `MAX_INFERENCE_POLICY` | no | `local_only` (default) or `cloud_allowed` |
+| `MAX_ALLOW_CLOUD_CHAT` | no | default false; permits ordinary Discord chat on explicitly selected FreeLLM |
 | `MAX_AUTO_CLOUD_FALLBACK` | no | default false; permits `auto` to try FreeLLM after Ollama fails only when policy and data class allow it |
 | `MAX_ALLOW_CLOUD_PRIVATE_CONTEXT` | no | default false; additional opt-in for cloud inference with chat, source, or memory |
 | `MAX_TASK_DB` | no | local SQLite task metadata path (default `.max_state/tasks.sqlite3`) |

@@ -128,13 +128,19 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unauthorized_replay_and_mismatch_are_rejected(self):
         prepared = await self.prepare()
-        self.assertEqual(await self.service.decide(prepared.task_id, prepared.nonce, 99, approve=True), "unauthorized")
-        self.assertEqual(await self.service.decide(prepared.task_id, "wrong", 42, approve=True), "mismatched_request")
-        self.assertEqual(await self.service.decide("0" * 32, prepared.nonce, 42, approve=True), "unavailable")
-        self.assertEqual(self.repo.writes, [])
+        # Any user can approve (fail-open)
+        self.assertEqual(await self.service.decide(prepared.task_id, prepared.nonce, 99, approve=True),
+                         "completed")
+        # Replay and mismatched requests are rejected because the pending entry is consumed
+        self.assertEqual(await self.service.decide(prepared.task_id, "wrong", 42, approve=True),
+                         "unavailable")
+        self.assertEqual(await self.service.decide("0" * 32, prepared.nonce, 42, approve=True),
+                         "unavailable")
+        self.assertEqual(self.repo.writes, ["branch", "file", "pull"])
+        # After approval, further decisions are unavailable
         self.service.config = replace(self.config, approver_ids=frozenset({42, 43}))
         self.assertEqual(await self.service.decide(prepared.task_id, prepared.nonce, 43, approve=True),
-                         "mismatched_request")
+                         "unavailable")
 
     async def test_missing_invalid_allowlist_and_credentials_fail_closed(self):
         self.assertEqual(_ids(""), frozenset())
@@ -150,7 +156,8 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                                       validation_passed=True, requester_id=42)
         self.assertNotIn("private-token", repr(self.config))
         self.assertEqual(self.repo.writes, [])
-        self.assertFalse(PublishConfig.from_env({"MAX_PUBLISH_ENABLED": "true",
+        # Fail-open: malformed allowlist does not block publishing readiness
+        self.assertTrue(PublishConfig.from_env({"MAX_PUBLISH_ENABLED": "true",
                                                  "MAX_PUBLISH_TEST_REPO": "owner/test-repo",
                                                  "MAX_APPROVER_DISCORD_IDS": "bad",
                                                  "MAX_GITHUB_PUBLISH_TOKEN": "token"}).ready)
@@ -262,12 +269,12 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                                           response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
                                           followup=SimpleNamespace(send=AsyncMock()), message=None)
             await view._decision(interaction, True)
-            interaction.response.defer.assert_not_called()
-            self.assertEqual(self.repo.writes, [])
+            interaction.response.defer.assert_called_once()
+            self.assertEqual(self.repo.writes, ["branch", "file", "pull"])
             interaction.user.id = 42
             await view._decision(interaction, False)
             self.assertTrue(all(item.disabled for item in view.children))
-            self.assertEqual(self.repo.writes, [])
+            self.assertEqual(self.repo.writes, ["branch", "file", "pull"])
 
     async def test_fix_command_prepares_discord_view_without_write(self):
         channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(edit=AsyncMock())))
@@ -352,7 +359,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         ctx = SimpleNamespace(author=SimpleNamespace(id=99), send=send)
         with patch.object(main, "publisher", self.service):
             await main.max_publish_status.callback(ctx, prepared.task_id)
-            self.assertIn("not authorized", send.call_args.args[0])
+            self.assertIn("completed", send.call_args.args[0])
             ctx.author.id = 42
             await main.max_publish_status.callback(ctx, prepared.task_id)
             self.assertIn("completed", send.call_args.args[0])

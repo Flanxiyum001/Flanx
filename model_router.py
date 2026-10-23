@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+import uuid
+from collections import OrderedDict
+from dataclasses import dataclass, field, replace
 from typing import Mapping
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -20,15 +22,18 @@ TASK_ENV_VARS: Mapping[str, str] = {
     "review": "MAX_MODEL_REVIEW",
 }
 ROLE_TASKS = {"planner": "general", "coder": "coding", "reviewer": "review", "tester": "review"}
-PRIVATE_DATA = frozenset({"private_repo", "source", "memory"})
+PRIVATE_DATA = frozenset({"chat", "private_repo", "source", "memory"})
 LOG = logging.getLogger(__name__)
 DEFAULT_LOCAL_MODEL = "qwen3:8b"
 DEFAULT_VISION_MODEL = "qwen3-vl:8b"
 _LABELED_SECRET = re.compile(
-    r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|"
-    r"authorization|cookie|client[_-]?secret)\s*[:=]\s*[^\r\n,}]+")
-_TOKEN_VALUE = re.compile(r"(?i)\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{12,}")
+    r"(?i)\b[A-Za-z0-9_]{0,40}(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|"
+    r"authorization|cookie|client[_-]?secret|private[_-]?key|credential|token|secret)"
+    r"[\"']?\s*[:=]\s*[\"']?[^\s\r\n,}][^\r\n,}]*")
+_TOKEN_VALUE = re.compile(r"(?i)\b(?:sk-|ghp_|gho_|ghs_|ghu_|github_pat_|xoxb-)[A-Za-z0-9_-]{12,}")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
+_AUTH_VALUE = re.compile(r"(?i)\b(?:authorization\s*[:=]\s*|bearer\s+)[A-Za-z0-9._~+/-]{8,}")
+_NATURAL_SECRET = re.compile(r"(?i)\b(?:password|api\s*key|access\s*token|oauth\s*token|client\s*secret)\s+is\s+\S{8,}")
 
 
 def _redact_cloud_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -37,6 +42,8 @@ def _redact_cloud_messages(messages: list[dict[str, str]]) -> list[dict[str, str
         content = _PRIVATE_KEY.sub("[redacted private key]", message["content"])
         content = _LABELED_SECRET.sub("[redacted credential]", content)
         content = _TOKEN_VALUE.sub("[redacted token]", content)
+        content = _AUTH_VALUE.sub("[redacted credential]", content)
+        content = _NATURAL_SECRET.sub("[redacted credential]", content)
         redacted.append({"role": message["role"], "content": content})
     return redacted
 
@@ -106,6 +113,7 @@ class RouterConfig:
             allow_cloud_private=_enabled(env, "MAX_ALLOW_CLOUD_PRIVATE_CONTEXT"),
             allowed_private_classes=frozenset(
                 name for name, variable in (
+                    ("chat", "MAX_ALLOW_CLOUD_CHAT"),
                     ("private_repo", "MAX_ALLOW_CLOUD_PRIVATE_REPO"),
                     ("source", "MAX_ALLOW_CLOUD_SOURCE"),
                     ("memory", "MAX_ALLOW_CLOUD_MEMORY"),
@@ -126,12 +134,26 @@ class RouterConfig:
         )
 
 
+@dataclass(frozen=True)
+class InferenceMetadata:
+    request_id: str
+    requested_provider: str
+    selected_provider: str | None
+    configured_model: str | None
+    status: str
+    fallback_attempted: bool
+    fallback_used: bool
+    error_category: str | None = None
+    upstream_provider: str = "unknown"
+
+
 class ModelError(Exception):
     """Safe failure: no prompt, response body, or credential in its message."""
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+        self.metadata: InferenceMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +163,7 @@ class ModelReply:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     provider: str = "unknown"
+    metadata: InferenceMetadata | None = None
 
 
 class ModelRouter:
@@ -152,6 +175,27 @@ class ModelRouter:
         self.cloud_client = cloud_client
         self._local_slots = asyncio.Semaphore(self.config.local_concurrency)
         self._cloud_slots = asyncio.Semaphore(self.config.cloud_concurrency)
+        self._inference_history: OrderedDict[str, InferenceMetadata] = OrderedDict()
+
+    def inference_status(self, request_id: str | None = None) -> InferenceMetadata | None:
+        """Return only bounded, redacted routing metadata from this process."""
+        if request_id is not None:
+            return self._inference_history.get(request_id)
+        return (self._inference_history[next(reversed(self._inference_history))]
+                if self._inference_history else None)
+
+    def _record_inference(self, metadata: InferenceMetadata) -> None:
+        self._inference_history[metadata.request_id] = metadata
+        while len(self._inference_history) > 100:
+            self._inference_history.popitem(last=False)
+        LOG.info(
+            "inference request_id=%s requested_provider=%s selected_provider=%s status=%s "
+            "fallback_attempted=%s fallback_used=%s error_category=%s",
+            metadata.request_id, metadata.requested_provider,
+            metadata.selected_provider or "none", metadata.status,
+            metadata.fallback_attempted, metadata.fallback_used,
+            metadata.error_category or "none",
+        )
 
     def selected_model(self, task: str = "general", *, role: str | None = None,
                        override: str | None = None, provider: str = "local") -> str:
@@ -208,6 +252,52 @@ class ModelRouter:
                        data_class: str | tuple[str, ...] = "private_repo",
                        temperature: float | None = None,
                        max_tokens: int | None = None) -> ModelReply:
+        requested = provider if provider is not None else self.config.provider
+        requested = requested.strip().lower() if isinstance(requested, str) else "invalid"
+        if requested not in {"local", "freellm", "cloud", "auto"}:
+            requested = "invalid"
+        trace = {"selected_provider": None, "configured_model": None,
+                 "fallback_attempted": False, "fallback_used": False}
+        request_id = uuid.uuid4().hex
+
+        def metadata(status: str, error_category: str | None = None) -> InferenceMetadata:
+            selected = trace["selected_provider"]
+            return InferenceMetadata(
+                request_id, requested, selected, trace["configured_model"], status,
+                trace["fallback_attempted"], trace["fallback_used"], error_category,
+                "not_applicable" if selected == "local" else "unknown",
+            )
+
+        try:
+            reply = await self._generate_impl(
+                messages, task=task, role=role, model=model, provider=provider,
+                data_class=data_class, temperature=temperature,
+                max_tokens=max_tokens, trace=trace)
+            actual = {"ollama": "local", "freellm": "freellm"}.get(reply.provider)
+            if actual is None or actual != trace["selected_provider"]:
+                raise ModelError("malformed_response", "The selected model adapter returned invalid routing metadata.")
+            trace["selected_provider"] = actual
+            trace["fallback_used"] = bool(trace["fallback_attempted"] and actual == "freellm")
+            event = metadata("success")
+            self._record_inference(event)
+            return replace(reply, metadata=event)
+        except ModelError as exc:
+            event = metadata("failure", exc.code if re.fullmatch(r"[a-z_]{1,40}", exc.code) else "unknown")
+            exc.metadata = event
+            self._record_inference(event)
+            raise
+        except Exception:
+            event = metadata("failure", "adapter_error")
+            self._record_inference(event)
+            error = ModelError("adapter_error", "Model adapter failed unexpectedly.")
+            error.metadata = event
+            raise error from None
+
+    async def _generate_impl(self, messages: list[dict[str, str]], *, task: str,
+                             role: str | None, model: str | None, provider: str | None,
+                             data_class: str | tuple[str, ...],
+                             temperature: float | None, max_tokens: int | None,
+                             trace: dict) -> ModelReply:
         cfg = self.config
         target = (provider or cfg.provider).strip().lower()
         if target == "cloud":
@@ -216,7 +306,7 @@ class ModelRouter:
             raise ModelError("configuration", "Inference provider or privacy policy is invalid.")
         classes = (data_class,) if isinstance(data_class, str) else data_class
         if not isinstance(classes, tuple) or not classes or any(
-            item not in ("general", "public", "private_repo", "source", "memory")
+            item not in ("general", "public", "chat", "private_repo", "source", "memory")
             for item in classes
         ):
             raise ModelError("configuration", "Unknown inference data class.")
@@ -243,17 +333,20 @@ class ModelRouter:
             raise ModelError("context_limit", "The request exceeds MAX_MODEL_INPUT_CHARS. Shorten its context.")
         if target == "freellm":
             self._cloud_permission(classes)
+            cloud_messages = _redact_cloud_messages(messages)
+            if cloud_messages != messages:
+                raise ModelError("privacy_blocked", "Credentials or authentication material cannot be sent to FreeLLM. Remove them from the request.")
             self._cloud_configuration()
             chosen = self.selected_model(task, role=role, override=model, provider="freellm")
             if not chosen:
                 raise ModelError("configuration", "FreeLLM requires AI_MODEL or a task-specific MAX_MODEL_* identifier.")
-            LOG.info("model route provider=freellm task=%s data_classes=%s",
-                     task if task in TASK_ENV_VARS else "other", ",".join(classes))
+            trace["selected_provider"] = "freellm"
+            trace["configured_model"] = chosen
             async with self._cloud_slots:
-                return await self._cloud(_redact_cloud_messages(messages), chosen, temperature, max_tokens)
+                return await self._cloud(cloud_messages, chosen, temperature, max_tokens)
         local_model = self.selected_model(task, role=role, override=model, provider="local")
-        LOG.info("model route provider=ollama task=%s data_classes=%s",
-                 task if task in TASK_ENV_VARS else "other", ",".join(classes))
+        trace["selected_provider"] = "local"
+        trace["configured_model"] = local_model
         try:
             async with self._local_slots:
                 return await self._local(messages, local_model, temperature, max_tokens)
@@ -264,6 +357,9 @@ class ModelRouter:
                 raise
             try:
                 self._cloud_permission(classes)
+                cloud_messages = _redact_cloud_messages(messages)
+                if cloud_messages != messages:
+                    raise ModelError("privacy_blocked", "Credentials or authentication material cannot be sent to FreeLLM. Remove them from the request.")
             except ModelError as blocked:
                 raise ModelError(local_error.code, f"{local_error} FreeLLM fallback blocked: {blocked}") from None
             try:
@@ -271,10 +367,11 @@ class ModelRouter:
                 cloud_model = self.selected_model(task, role=role, override=model, provider="freellm")
                 if not cloud_model:
                     raise ModelError("configuration", "FreeLLM requires AI_MODEL or a task-specific MAX_MODEL_* identifier.")
-                LOG.info("model route provider=freellm fallback_from=ollama task=%s data_classes=%s",
-                         task if task in TASK_ENV_VARS else "other", ",".join(classes))
+                trace["selected_provider"] = "freellm"
+                trace["configured_model"] = cloud_model
+                trace["fallback_attempted"] = True
                 async with self._cloud_slots:
-                    return await self._cloud(_redact_cloud_messages(messages), cloud_model, temperature, max_tokens)
+                    return await self._cloud(cloud_messages, cloud_model, temperature, max_tokens)
             except ModelError as cloud_error:
                 raise ModelError("providers_failed", f"Ollama: {local_error} FreeLLM: {cloud_error}") from None
 
