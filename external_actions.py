@@ -107,6 +107,7 @@ class ExternalActionService:
 
     async def start(self, account_id: str, slug: str, arguments: dict, *, requester_id: str) -> PreparedAction:
         action, tool = self.adapter.policy.decide(account_id, slug)
+        self.adapter.policy.check_repository_scope(action, arguments)
         # Discovery and schema validation happen before constructing a task.
         metadata = await self.adapter.discover(account_id, slug)
         if metadata["tool"] != tool:

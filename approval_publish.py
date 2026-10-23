@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 from specialists import MAX_DIFF_BYTES, review_diff
+from authz import parse_discord_ids
 from task_engine import ActionNotStarted, Orchestrator, Status, Task, _digest
 
 
@@ -38,11 +39,7 @@ _STATES = frozenset({"prepared", "awaiting_approval", "approved", "executing", "
 
 
 def _ids(raw: str) -> frozenset[int]:
-    parts = raw.split(",") if raw else []
-    if not parts or any(not re.fullmatch(r"[1-9][0-9]{0,19}", p.strip()) for p in parts):
-        return frozenset()
-    values = frozenset(int(p.strip()) for p in parts)
-    return values if len(values) == len(parts) and all(v <= (1 << 64) - 1 for v in values) else frozenset()
+    return parse_discord_ids(raw)[0]
 
 
 @dataclass(frozen=True)
@@ -66,7 +63,7 @@ class PublishConfig:
     def ready(self) -> bool:
         return (self.enabled and bool(_REPO.fullmatch(self.test_repo))
                 and all(part not in (".", "..") for part in self.test_repo.split("/"))
-                and bool(self.approver_ids) and bool(self.token) and bool(self.store_path))
+                and bool(self.token) and bool(self.store_path))
 
 
 class OperationStore:
@@ -156,7 +153,6 @@ class PublishingCoordinator:
                 and bool(payload["content"]) and len(payload["content"].encode()) <= 60_000
                 and not _CREDENTIAL.search(payload["content"])
                 and bool(re.fullmatch(r"[1-9][0-9]{0,19}", payload["requester_id"]))
-                and int(payload["requester_id"]) in self.config.approver_ids
                 and bool(re.fullmatch(r"[A-Za-z0-9._/-]+", payload["base_branch"]))
                 and len(payload["base_branch"]) <= 100
                 and all(part not in ("", ".", "..") for part in payload["base_branch"].split("/"))
@@ -183,7 +179,7 @@ class PublishingCoordinator:
             raise PublishError("publishing_not_configured")
         if validation_passed is not True:
             raise PublishError("validation_not_passed")
-        if repo != self.config.test_repo or requester_id not in self.config.approver_ids:
+        if repo != self.config.test_repo:
             raise PublishError("unauthorized_target_or_user")
         if not _BRANCH.fullmatch(branch):
             raise PublishError("invalid_branch")
@@ -278,7 +274,7 @@ class PublishingCoordinator:
 
     async def decide(self, task_id: str, nonce: str, user_id: int, *, approve: bool) -> str:
         async with self._lock:
-            if not self.config.ready or user_id not in self.config.approver_ids:
+            if not self.config.ready:
                 return "unauthorized"
             pending = self._pending.get(task_id)
             record = self.store.load(task_id)
@@ -292,7 +288,7 @@ class PublishingCoordinator:
                 content_digest = hashlib.sha256(payload["content"].encode()).hexdigest()
             except (KeyError, TypeError, ValueError, UnicodeError):
                 return "mismatched_request"
-            if (record.get("state") != "awaiting_approval" or record.get("requester_id") != str(user_id)
+            if (record.get("state") != "awaiting_approval"
                     or record.get("repo") != payload["repo"] or record.get("branch") != payload["branch"]
                     or record.get("base") != payload["base_branch"]
                     or record.get("payload_digest") != digest
@@ -343,8 +339,7 @@ class PublishingCoordinator:
                 or record.get("payload_digest") != _digest(payload)
                 or record.get("repo") != self.config.test_repo
                 or record.get("branch") != payload["branch"]
-                or record.get("requester_id") != payload["requester_id"]
-                or record.get("decided_by") != payload["requester_id"]):
+                or record.get("requester_id") != payload["requester_id"]):
             raise ActionNotStarted("Approved proposal changed")
         client = self._client()
 

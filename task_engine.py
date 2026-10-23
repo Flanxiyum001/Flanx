@@ -528,8 +528,7 @@ class Orchestrator:
             current = self.get(request.task_id)
             if (current is None or current.status != Status.AWAITING_APPROVAL
                     or self._approval_requests.get(request.task_id) != request
-                    or (request.expires_at is not None and _now() >= request.expires_at)
-                    or (request.requester_id and request.requester_id != approved_by)):
+                    or (request.expires_at is not None and _now() >= request.expires_at)):
                 raise ValueError("Approval does not match a pending action")
             current = current.transition(Status.PENDING,
                                          approval_status=ApprovalStatus.APPROVED)
@@ -557,8 +556,7 @@ class Orchestrator:
                     or request.payload_digest != digest
                     or request.expires_at is None or _now() >= request.expires_at
                     or task.task_id not in self._approved
-                    or task.task_id not in self._approvers
-                    or (request.requester_id and self._approvers[task.task_id] != request.requester_id)):
+                    or task.task_id not in self._approvers):
                 raise ValueError("Approval is no longer valid for this write")
 
     async def deny(self, request: ApprovalRequest) -> Task:

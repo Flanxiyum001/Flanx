@@ -150,17 +150,19 @@ class DiscordConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.chat_intent("Disconnect GitHub")[0], "connection")
         self.assertNotEqual(main.chat_intent("perhaps connect to GitHub someday")[0], "connection")
 
-    async def test_unauthorized_cannot_create_link(self):
-        with patch.object(main, "publish_config", SimpleNamespace(approver_ids=frozenset())):
+    async def test_anyone_can_create_link(self):
+        with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "99"}), \
+             patch.object(main, "composio_adapter", self.adapter):
             await main._handle_connection(self.author, self.channel,
                                           {"operation": "connect", "toolkit": "github"})
-        self.assertEqual(self.sdk.connected_accounts.links, [])
-        self.author.send.assert_not_called()
+        self.assertEqual(len(self.sdk.connected_accounts.links), 1)
+        self.assertIn("private-token-value", self.author.send.call_args.args[0])
+        self.assertNotIn("private-token-value", str(self.channel.send.await_args_list))
 
     async def test_public_natural_request_uses_authorized_dm_path(self):
         message = SimpleNamespace(author=self.author, channel=self.channel,
                                   content="Max, connect to GitHub.", mentions=[])
-        with patch.object(main, "publish_config", SimpleNamespace(approver_ids={42})), \
+        with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "42"}), \
              patch.object(main, "composio_adapter", self.adapter), \
              patch.object(main, "get_pref", return_value=None), \
              patch.object(main.bot, "process_commands", new_callable=AsyncMock) as process:
@@ -175,7 +177,7 @@ class DiscordConnectionTests(unittest.IsolatedAsyncioTestCase):
         handler = logging.StreamHandler(captured)
         logger = logging.getLogger("composio_adapter")
         logger.addHandler(handler)
-        with patch.object(main, "publish_config", SimpleNamespace(approver_ids={42})), \
+        with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "42"}), \
              patch.object(main, "composio_adapter", self.adapter):
             await main._handle_connection(self.author, self.channel,
                                           {"operation": "connect", "toolkit": "github"})

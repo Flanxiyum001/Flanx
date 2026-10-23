@@ -33,20 +33,37 @@ compatibility alias. No public URL is assumed. Leaving the provider unset
 selects Ollama even when the FreeLLM URL and model are present.
 
 Repository source, memory, and Discord chat content are treated as private.
-Cloud use for them also requires an explicit data-class opt-in.
-For narrower permission, use `MAX_ALLOW_CLOUD_PRIVATE_REPO=true` for Discord
-chat and repository context, `MAX_ALLOW_CLOUD_SOURCE=true` for source code,
-or `MAX_ALLOW_CLOUD_MEMORY=true` for memory. The broad setting permits all
-three classes. Each setting still requires `MAX_INFERENCE_POLICY=cloud_allowed`
+Cloud use for them also requires an explicit data-class opt-in. Ordinary chat
+uses `chat` and requires `MAX_ALLOW_CLOUD_CHAT=true`. Pasted repository names
+or references use `private_repo` and require
+`MAX_ALLOW_CLOUD_PRIVATE_REPO=true`; fenced source uses `source` and requires
+`MAX_ALLOW_CLOUD_SOURCE=true`. Memory requires `MAX_ALLOW_CLOUD_MEMORY=true`.
+One narrow setting never authorizes another class. The broad
+`MAX_ALLOW_CLOUD_PRIVATE_CONTEXT=true` setting permits all private classes.
+Each setting still requires `MAX_INFERENCE_POLICY=cloud_allowed`
 and an explicitly selected cloud provider.
 The repair prompt contains both source and memory, so its cloud route requires
 both narrow permissions or the broad private-context permission.
+Credential or authentication material is rejected before a FreeLLM request,
+even when its data class is approved. Secret redaction remains a backup guard.
 Blocked FreeLLM requests explain the policy and offer a local route. In
 `MAX_INFERENCE_PROVIDER=auto`, a local failure can trigger FreeLLM only when
 `MAX_AUTO_CLOUD_FALLBACK=true` and all policy and data-class gates permit it.
 The separate
 `MAX_ALLOW_CLOUD_REPOSITORY_CONTEXT=true` setting enables the remote repair
 sandbox and web workflow; it does not permit cloud model inference.
+
+Each inference request now records a correlation ID, requested provider,
+adapter that actually executed, configured model, success or failure, fallback
+attempt and use, and a safe error category. A normal Discord chat reply
+includes its Request ID. An authorized owner can DM
+`!max_inference_status <request-id>` (or omit the ID for the latest bounded
+record) to inspect the adapter outcome. Server logs include the same ID and
+routing status, without prompts, credentials, or provider response bodies.
+For FreeLLM, Max reports the **FreeLLM gateway** and configured model;
+the gateway's upstream model provider is **unknown** unless a future trusted
+API explicitly supplies that identity. `AI_MODEL=auto` does not identify an
+upstream model. Records are in memory and reset on restart.
 
 ## Resource limits
 

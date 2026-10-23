@@ -6,9 +6,10 @@
     "github": "replace-with-github-auth-config-id",
     "googlecalendar": "replace-with-google-calendar-auth-config-id"
   },
+  "github_repository_allowlist": [],
   "actions": [
     {
-      "slug": "GITHUB_GET_REPOS",
+      "slug": "GITHUB_WHO_AM_I",
       "toolkit": "github",
       "account_id": "replace-with-dedicated-connected-account-id",
       "user_id": "replace-with-composio-user-id",
@@ -16,6 +17,16 @@
       "risk": "read",
       "category": "github",
       "max_calls": 2
+    },
+    {
+      "slug": "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER",
+      "toolkit": "github",
+      "account_id": "replace-with-dedicated-connected-account-id",
+      "user_id": "replace-with-composio-user-id",
+      "version": "replace-with-discovered-tool-version",
+      "risk": "read",
+      "category": "github",
+      "max_calls": 5
     }
   ]
 }
