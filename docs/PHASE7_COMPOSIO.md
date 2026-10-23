@@ -50,6 +50,50 @@ accounts or increasing volume. No paid plan is assumed by Max.
    an uncertain write; use `!max_tool_status <task_id>` and read-only service
    inspection to reconcile it.
 
+## GitHub read-only rollout (NVIDIA integration increment)
+
+This rollout **refuses all configured GitHub actions classified as writes**,
+including `trusted_autonomy`. It does not authorize publishing, PR merges,
+repository modification, or deployment. A connected GitHub account alone does
+not grant any action permissions.
+
+1. In the [Composio dashboard](https://app.composio.dev/), choose the intended
+   Composio project and inspect **GitHub** under toolkit/authentication setup.
+   Create or select an auth config with minimal GitHub read permissions. Keep
+   the real auth-config ID private; do not invent it.
+2. Use the hosted connection flow with `!max_connect github` in a DM from an
+   authorized owner. Complete the hosted consent link yourself. Inspect
+   `!max_connections` or `!max_connection_status github` in DM. The
+   connection belongs to the derived `max-discord-<DiscordID>` owner.
+3. Discover the exact read-only GitHub action slugs, input JSON Schemas and
+   toolkit versions in the real account using Composio's SDK/toolkit catalog.
+   Do not substitute example placeholders or use `latest` without a pinned
+   version. Supported account-inventory candidates are listed below.
+4. Copy `docs/composio-policy.example.json` to
+   `.max_state/composio-policy.json` (an ignored/private location). Set
+   `MAX_COMPOSIO_POLICY_FILE` to that exact location. Populate the real
+   `connections.github` auth-config ID, the precise connected account ID,
+   `user_id=max-discord-<DiscordID>`, exact discovered action slugs and
+   versions. Set `github_repository_allowlist` only to reviewed `owner/repo`
+   names. `actions` must remain `risk=read`.
+5. Configure `MAX_OWNER_DISCORD_IDS`, `MAX_GITHUB_ALLOWED_USER_IDS`,
+   `COMPOSIO_API_KEY`, `MAX_COMPOSIO_ENABLED=true`, and
+   `MAX_EXTERNAL_ACTIONS_DISABLED=false` only in an explicitly approved
+   **test** bot environment. The kill switches default to disabled.
+6. Verify via owner DM: `!max_capabilities`, `!max_github_repos`, and then
+   `!max_tool <account_id> <EXACT_READ_SLUG> {}` only if the discovered input
+   schema accepts empty arguments. For nonempty inputs, validate exact fields
+   and repository scope. Unauthorized or cross-account requests must fail.
+   No live credentials are required for CI tests.
+
+The generic external action entrypoint now rechecks authenticated owner,
+GitHub-specific user allowlist, and connected-account owner before every read.
+The SDK, model and tool results remain isolated. Structured model-generated
+tool invocation remains disabled pending a separately reviewed orchestrator.
+
+See [NVIDIA model configuration](NVIDIA_NEMOTRON.md) for the independent
+inference provider.
+
 ## Conversational connections
 
 The optional `composio==0.18.2` SDK provides `connected_accounts.link`, `list`,
