@@ -2,6 +2,7 @@
 import asyncio
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from composio_adapter import CapabilityPolicy, ComposioAdapter, IntegrationError, MockComposioClient
@@ -16,7 +17,7 @@ SCHEMA = {"type": "object", "properties": {
 def policy(risk="read", autonomy="observe"):
     return CapabilityPolicy({"autonomy": autonomy, "actions": [{
         "slug": "NOTES_GET_ITEM" if risk == "read" else "NOTES_CREATE_ITEM",
-        "toolkit": "notes", "account_id": "ca_test", "user_id": "user_test",
+        "toolkit": "notes", "account_id": "ca_test", "user_id": "max-discord-42",
         "version": "v1", "risk": risk, "category": "notes", "max_calls": 2,
     }]})
 
@@ -25,8 +26,11 @@ class Phase7Tests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.env_patch = patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "42"})
+        self.env_patch.start()
 
     def tearDown(self):
+        self.env_patch.stop()
         self.temp.cleanup()
 
     def service(self, risk="read", autonomy="observe", client=None):
