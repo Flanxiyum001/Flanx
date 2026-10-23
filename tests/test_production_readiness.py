@@ -179,33 +179,35 @@ class ModelAndErrorTests(unittest.TestCase):
 
 
 class GitHubAccessControlTests(unittest.TestCase):
-    def test_anyone_can_use_github_operations(self):
-        self.assertTrue(github_user_allowed(1234, {}))
-        self.assertTrue(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "invalid"}))
-        self.assertTrue(github_user_allowed(-1, {"MAX_GITHUB_ALLOWED_USER_IDS": "-1"}))
-        self.assertTrue(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "12345"}))
+    def test_missing_or_malformed_allowlist_fails_closed(self):
+        self.assertFalse(github_user_allowed(1234, {}))
+        self.assertFalse(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "invalid"}))
+        self.assertFalse(github_user_allowed(-1, {"MAX_GITHUB_ALLOWED_USER_IDS": "-1"}))
+        self.assertFalse(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "12345"}))
         self.assertTrue(github_user_allowed(1234, {"MAX_GITHUB_ALLOWED_USER_IDS": "9, 1234,5678"}))
 
-    def test_any_actor_can_enumerate_github(self):
+    def test_unknown_discord_actor_cannot_enumerate_github(self):
         event = SimpleNamespace(author_id=8)
-        with patch.object(repos, "_github") as github:
-            result = asyncio.run(repos.handle(event, {"action": "list", "page": 1}))
-        self.assertNotEqual(result, GITHUB_ACCESS_DENIED)
-        github.assert_called()
+        with patch.dict("os.environ", {"MAX_GITHUB_ALLOWED_USER_IDS": "7"}):
+            with patch.object(repos, "_github") as github:
+                result = asyncio.run(repos.handle(event, {"action": "list", "page": 1}))
+        self.assertEqual(result, GITHUB_ACCESS_DENIED)
+        github.assert_not_called()
 
-    def test_any_actor_can_read_or_poison_verified_lessons(self):
+    def test_untrusted_actor_cannot_read_or_poison_verified_lessons(self):
         event = SimpleNamespace(author_id=8)
-        with patch.object(lessons, "add_verified_lesson") as write:
-            with patch.object(lessons, "list_verified_lessons") as read:
-                read_result = asyncio.run(lessons.handle(
-                    event, {"action": "list", "repository": "owner/repo"}))
-                write_result = asyncio.run(lessons.handle(
-                    event, {"action": "add", "repository": "owner/repo",
-                            "failure": "f", "root_cause": "r", "prevention": "p", "evidence": "e"}))
-        self.assertNotEqual(read_result, GITHUB_ACCESS_DENIED)
-        self.assertNotEqual(write_result, GITHUB_ACCESS_DENIED)
-        read.assert_called()
-        write.assert_called()
+        with patch.dict("os.environ", {"MAX_GITHUB_ALLOWED_USER_IDS": "7"}):
+            with patch.object(lessons, "add_verified_lesson") as write:
+                with patch.object(lessons, "list_verified_lessons") as read:
+                    read_result = asyncio.run(lessons.handle(
+                        event, {"action": "list", "repository": "owner/repo"}))
+                    write_result = asyncio.run(lessons.handle(
+                        event, {"action": "add", "repository": "owner/repo",
+                                "failure": "f", "root_cause": "r", "prevention": "p", "evidence": "e"}))
+        self.assertEqual(read_result, GITHUB_ACCESS_DENIED)
+        self.assertEqual(write_result, GITHUB_ACCESS_DENIED)
+        read.assert_not_called()
+        write.assert_not_called()
 
     def test_memory_helper_never_writes_custom_default_branch(self):
         client = MagicMock()

@@ -153,8 +153,8 @@ class InferenceMetadataTests(unittest.IsolatedAsyncioTestCase):
         ctx.send.reset_mock()
         with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "99"}):
             await main.max_inference_status.callback(ctx, request_id)
-        self.assertNotIn("not in the configured owner allowlist",
-                         ctx.send.await_args.args[0])
+        self.assertIn("not in the configured owner allowlist",
+                      ctx.send.await_args.args[0])
 
 
 if __name__ == "__main__":
