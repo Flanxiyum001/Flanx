@@ -145,10 +145,21 @@ class CapabilityPolicy:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> CapabilityPolicy:
         env = os.environ if env is None else env
-        path = env.get("MAX_COMPOSIO_POLICY_FILE", "")
-        if not _flag(env.get("MAX_COMPOSIO_ENABLED")) or not path:
+        if not _flag(env.get("MAX_COMPOSIO_ENABLED")):
             return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
-        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        document = None
+        path = env.get("MAX_COMPOSIO_POLICY_FILE", "")
+        if path:
+            try:
+                document = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                document = None
+        if document is None:
+            inline = env.get("MAX_COMPOSIO_POLICY", "")
+            if inline:
+                document = json.loads(inline)
+        if document is None:
+            return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
         return cls(document, emergency_off=_flag(env.get("MAX_EXTERNAL_ACTIONS_DISABLED")))
 
     def decide(self, account_id: str, slug: str) -> tuple[Action, str]:
