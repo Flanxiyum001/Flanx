@@ -150,14 +150,23 @@ class DiscordConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.chat_intent("Disconnect GitHub")[0], "connection")
         self.assertNotEqual(main.chat_intent("perhaps connect to GitHub someday")[0], "connection")
 
-    async def test_anyone_can_create_link(self):
-        with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "99"}), \
+    async def test_authorized_owner_can_create_link(self):
+        with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "42"}), \
              patch.object(main, "composio_adapter", self.adapter):
             await main._handle_connection(self.author, self.channel,
                                           {"operation": "connect", "toolkit": "github"})
         self.assertEqual(len(self.sdk.connected_accounts.links), 1)
         self.assertIn("private-token-value", self.author.send.call_args.args[0])
         self.assertNotIn("private-token-value", str(self.channel.send.await_args_list))
+
+    async def test_unauthorized_user_cannot_create_link(self):
+        with patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "99"}), \
+             patch.object(main, "composio_adapter", self.adapter):
+            await main._handle_connection(self.author, self.channel,
+                                          {"operation": "connect", "toolkit": "github"})
+        self.assertEqual(len(self.sdk.connected_accounts.links), 0)
+        self.assertIn("not in the configured owner allowlist",
+                      self.channel.send.call_args.args[0])
 
     async def test_public_natural_request_uses_authorized_dm_path(self):
         message = SimpleNamespace(author=self.author, channel=self.channel,
