@@ -1271,7 +1271,8 @@ async def max_inference_status(ctx, request_id: str = ""):
                   and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}", model)
                   and not re.search(r"(?i)(?:sk-|ghp_|github_pat_|token|secret|password|api.?key)", model)
                   else "unknown or redacted")
-    selected = {"freellm": "FreeLLM gateway", "local": "local Ollama"}.get(
+    selected = {"freellm": "FreeLLM gateway", "local": "local Ollama",
+                "nvidia": "NVIDIA Nemotron"}.get(
         record.selected_provider, "none (blocked before dispatch)")
     await ctx.send(
         f"Request `{record.request_id}`: `{record.status}`. "
@@ -1527,6 +1528,10 @@ async def max_tool(ctx, account_id: str, slug: str, *, arguments_json: str = "{}
         return
     if not _external_admin(ctx) or external_service is None:
         await ctx.send("Action unavailable or unauthorized.")
+        return
+    action = external_service.adapter.policy.actions.get((account_id, slug))
+    if action is not None and action.toolkit == "github" and not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
         return
     try:
         arguments = json.loads(arguments_json)
