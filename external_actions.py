@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from composio_adapter import ComposioAdapter, IntegrationError
+from authz import owner_access, github_user_allowed
 from memory_store import MemoryStore
 from task_engine import Orchestrator, Status, Task
 
@@ -106,7 +107,20 @@ class ExternalActionService:
                                  f"{slug}: {task.error_code or task.status.value}")
 
     async def start(self, account_id: str, slug: str, arguments: dict, *, requester_id: str) -> PreparedAction:
+        # Never use a model-supplied identity or another owner's account.
+        # The requester here comes from the authenticated Discord caller.
+        try:
+            requester = int(requester_id) if str(requester_id).isascii() and str(requester_id).isdecimal() else None
+        except (ValueError, TypeError):
+            requester = None
+        if not owner_access(requester).allowed:
+            raise IntegrationError("permission_denied")
         action, tool = self.adapter.policy.decide(account_id, slug)
+        from composio_adapter import _user_id
+        if action.user_id != _user_id(requester_id):
+            raise IntegrationError("ownership_mismatch")
+        if action.toolkit == "github" and not github_user_allowed(requester):
+            raise IntegrationError("permission_denied")
         self.adapter.policy.check_repository_scope(action, arguments)
         # Discovery and schema validation happen before constructing a task.
         metadata = await self.adapter.discover(account_id, slug)
