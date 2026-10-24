@@ -40,7 +40,7 @@ from composio_adapter import ComposioAdapter, IntegrationError, composio_setup_i
 from external_actions import ExternalActionService
 from github_visibility import github_visibility
 from memory_store import MemoryStore
-from authz import GITHUB_ACCESS_DENIED, github_user_allowed, owner_access
+from authz import GITHUB_ACCESS_DENIED, github_user_allowed, owner_access, parse_discord_ids
 from repo_review import (REPO_URL_RE, contains_potential_secret, extract_repository,
                          inspect_repository, normalize_repository, validate_target_path)
 
@@ -533,6 +533,123 @@ def _strip_name_trigger(text: str) -> "str | None":
     return remainder
 
 
+def _natural_message_text(message) -> str | None:
+    """Pick deliberate conversations; guilds never become an open hot mic."""
+    text = (getattr(message, "content", "") or "").strip()
+    # Legacy prefixed commands are always handled by discord.py, once.
+    if text.startswith("!"):
+        return None
+    if bot.user and any(user.id == bot.user.id for user in getattr(message, "mentions", ())):
+        return re.sub(rf"<@!?{bot.user.id}>", "", text).strip()
+    named = _strip_name_trigger(text)
+    if named is not None:
+        return named
+    guild = getattr(message, "guild", getattr(message.channel, "guild", None))
+    if guild is None:
+        # DMs are already addressed to the bot: no name or prefix needed.
+        return text if text or getattr(message, "attachments", None) else None
+    # Group/server passive listening requires an explicit channel allowlist and
+    # an authorized owner. No default server-wide or all-user listening.
+    channel_ids, status = parse_discord_ids(os.getenv("MAX_NATURAL_CHANNEL_IDS"))
+    if (status == "ok" and getattr(message.channel, "id", None) in channel_ids
+            and owner_access(message.author.id).allowed):
+        return text if text or getattr(message, "attachments", None) else None
+    return None
+
+
+def _plain_request(text: str) -> str:
+    """Remove bounded courtesy prefixes only for deterministic commands."""
+    return re.sub(
+        r"^\\s*(?:(?:please|pls)\\s+|(?:can|could|would)\\s+you\\s+){1,2}",
+        "", text or "", flags=re.IGNORECASE,
+    ).strip()
+
+
+def natural_command_intent(text: str) -> dict | None:
+    """Allow only exact, auditable language-to-command mappings.
+
+    Never let model output invoke commands, and never infer tool arguments.
+    The called command callback still performs its original authorization.
+    """
+    statement = _plain_request(text).strip().rstrip("?.!").strip()
+    fixed = (
+        (r"(?:max_composio_status|(?:check|show|get)\\s+(?:my\\s+)?composio"
+         r"(?:\\s+(?:setup|connection))?\\s+status|composio\\s+status)",
+         "composio_status"),
+        (r"(?:max_capabilities|(?:show|list|what\\s+are)\\s+(?:my\\s+)?"
+         r"(?:available\\s+)?(?:tools|capabilities))",
+         "capabilities"),
+        (r"(?:max_inference_status|(?:show|check|get)\\s+(?:my\\s+)?"
+         r"(?:inference|model)\\s+status)",
+         "inference_status"),
+        (r"(?:max_connections|(?:show|list)\\s+(?:my\\s+)?connections)",
+         "connections"),
+        (r"(?:max_github_repos|(?:show|list)\\s+(?:my\\s+)?github\\s+repos(?:itories)?)",
+         "github_repos"),
+        (r"(?:max_voice|(?:join|start)\\s+(?:my\\s+)?voice\\s+channel)",
+         "voice_join"),
+        (r"(?:max_voice_leave|(?:leave|stop)\\s+(?:the\\s+)?voice\\s+channel)",
+         "voice_leave"),
+        (r"(?:max_tool_disable|disable\\s+(?:all\\s+)?composio\\s+tools)",
+         "tool_disable"),
+    )
+    for pattern, command in fixed:
+        if re.fullmatch(pattern, statement, re.IGNORECASE):
+            return {"command": command}
+
+    connect = re.fullmatch(
+        r"(?:max_connect|connect(?:\\s+(?:to|my))?)\\s+"
+        r"(?P<toolkit>github|google\\s*calendar)",
+        statement, re.IGNORECASE,
+    )
+    if connect:
+        toolkit = connect.group("toolkit").lower().replace(" ", "")
+        return {"command": "connect", "toolkit": toolkit}
+
+    tool = re.fullmatch(
+        r"(?:run|execute|call)\\s+(?:composio\\s+)?tool\\s+"
+        r"(?P<account>ca_[A-Za-z0-9_-]{1,120})\\s+"
+        r"(?P<slug>[A-Z][A-Z0-9_]{1,119})(?:\\s+(?P<json>\\{.{0,4000}\\}))?",
+        statement, re.DOTALL,
+    )
+    if tool:
+        return {"command": "tool", "account": tool.group("account"),
+                "slug": tool.group("slug"), "arguments": tool.group("json") or "{}"}
+    return None
+
+
+async def _run_natural_command(message, request: dict) -> None:
+    """Use existing command callbacks, not a new unchecked execution path."""
+    command = request["command"]
+    if command == "connect":
+        await _handle_connection(message.author, message.channel,
+                                 {"operation": "connect", "toolkit": request["toolkit"]})
+        return
+    if command == "connections":
+        await _handle_connection(message.author, message.channel, {"operation": "list"})
+        return
+    if command == "github_repos":
+        await _handle_github_visibility(message.author, message.channel)
+        return
+    ctx = await bot.get_context(message)
+    callbacks = {
+        "composio_status": max_composio_status,
+        "capabilities": max_capabilities,
+        "inference_status": max_inference_status,
+        "voice_join": max_voice,
+        "voice_leave": max_voice_leave,
+        "tool_disable": max_tool_disable,
+        "tool": max_tool,
+    }
+    if command == "tool":
+        await callbacks[command].callback(
+            ctx, request["account"], request["slug"],
+            arguments_json=request["arguments"],
+        )
+    else:
+        await callbacks[command].callback(ctx)
+
+
 def _extract_repo(text: str) -> "str | None":
     """First owner/repo token that is not a file path like src/app.py."""
     return extract_repository(text)
@@ -580,10 +697,13 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     stripped = (text or "").strip().strip("?.!")
     if not stripped:
         return "help", {}
-    connection = connection_intent(text)
+    native = natural_command_intent(text)
+    if native:
+        return "native_command", native
+    connection = connection_intent(_plain_request(text))
     if connection:
         return "connection", connection
-    if GITHUB_VISIBILITY_RE.fullmatch(text or ""):
+    if GITHUB_VISIBILITY_RE.fullmatch(_plain_request(text)):
         return "github_visibility", {}
     extension = integrations.match(stripped)
     if extension:
@@ -653,24 +773,17 @@ def discord_data_class(prompt: str) -> str:
 async def on_ready():
     print(f"🤖 Max online as {bot.user} (chat mode + free sandbox + cloud task staging)")
     await bot.change_presence(
-        activity=discord.Game(name="just say 'max …' · !max_fix · !update_repo")
+        activity=discord.Game(name="DM me naturally · mention me in servers")
     )
 
 
 @bot.event
 async def on_message(message):
-    """Chat mode: a bot mention or 'max …' with no prefix, alongside !commands."""
+    """Direct DMs, mentions or explicitly opted-in owner channels."""
     if message.author.bot:
         return
 
-    text = (message.content or "").strip()
-    if bot.user and any(user.id == bot.user.id for user in message.mentions):
-        remainder = re.sub(rf"<@!?{bot.user.id}>", "", text).strip()
-    else:
-        remainder = _strip_name_trigger(text)
-
-    # Never inspect attachments or reply to unrelated server messages.
-    # Prefix commands still pass through discord.py's normal dispatcher.
+    remainder = _natural_message_text(message)
     if remainder is None:
         await bot.process_commands(message)
         return
@@ -697,7 +810,9 @@ async def on_message(message):
         await bot.process_commands(message)
         return
     try:
-        if intent == "connection":
+        if intent == "native_command":
+            await _run_natural_command(message, payload)
+        elif intent == "connection":
             await _handle_connection(message.author, channel, payload)
         elif intent == "github_visibility":
             await _handle_github_visibility(message.author, channel)
