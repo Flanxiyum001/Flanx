@@ -66,20 +66,20 @@ class AnalysisResult:
 
 class MultimodalProcessor:
     """Processes multi-modal inputs and generates analysis."""
-    
+
     def __init__(self):
         self.router = ModelRouter()
         self._session: Optional[aiohttp.ClientSession] = None
-    
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
-    
+
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
-    
+
     def detect_input_type(self, attachment: discord.Attachment) -> str:
         """Detect input type from Discord attachment."""
         ext = Path(attachment.filename).suffix.lower()
@@ -92,19 +92,19 @@ class MultimodalProcessor:
         elif ext in CODE_EXTENSIONS or attachment.filename.endswith(('.txt', '.log', '.xml', '.html', '.css')):
             return 'file'
         return 'unknown'
-    
+
     async def process_attachment(self, attachment: discord.Attachment, user_id: int) -> MultimodalInput:
         """Download and process a Discord attachment."""
         input_type = self.detect_input_type(attachment)
         limit = MAX_IMAGE_SIZE if input_type == "image" else MAX_FILE_SIZE
         if attachment.size > limit:
             raise ValueError(f"Attachment exceeds the allowed size limit ({limit} bytes)")
-        
+
         content = await attachment.read()
         # Trust the bytes received, not only Discord's advertised size.
         if len(content) > limit:
             raise ValueError(f"Attachment exceeds the allowed size limit ({limit} bytes)")
-        
+
         return MultimodalInput(
             input_type=input_type,
             content=content,
@@ -115,20 +115,20 @@ class MultimodalProcessor:
             timestamp=datetime.now(timezone.utc),
             metadata={'url': attachment.url, 'width': getattr(attachment, 'width', None), 'height': getattr(attachment, 'height', None)}
         )
-    
+
     async def analyze_image(self, image_data: bytes, filename: str, context: str = "") -> AnalysisResult:
         """Analyze an image (screenshot, UI mockup, error screen, etc.)."""
         # Save image temporarily for analysis
         with tempfile.NamedTemporaryFile(suffix=Path(filename).suffix, delete=False) as f:
             f.write(image_data)
             temp_path = f.name
-        
+
         try:
             # Open with PIL to get info and potentially resize
             img = Image.open(temp_path)
             width, height = img.size
             mode = img.mode
-            
+
             # Convert to base64 for model input
             buffered = io.BytesIO()
             # Resize if too large (max 1024px on longest side for analysis)
@@ -138,7 +138,7 @@ class MultimodalProcessor:
             img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
             img.save(buffered, format="PNG", optimize=True)
             img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            
+
             # Analyze with vision-capable model
             prompt = f"""Analyze this image in the context of software development.
 
@@ -157,7 +157,7 @@ Provide:
 - Specific issues identified (if any)
 - Suggested code fixes with file paths where possible
 - Confidence level (0.0-1.0)"""
-            
+
             try:
                 reply = await self.router.generate(
                     messages=[
@@ -173,13 +173,13 @@ Provide:
                     data_class="source",
                     max_tokens=1500,
                 )
-                
+
                 analysis_text = reply.text
-                
+
                 # Parse the analysis for structured data
                 suggested_actions = []
                 code_fixes = []
-                
+
                 # Extract suggested actions (simple heuristic)
                 for line in analysis_text.split('\n'):
                     line = line.strip()
@@ -187,7 +187,7 @@ Provide:
                         action = line.lstrip('- *•0123456789. ')
                         if action:
                             suggested_actions.append(action)
-                
+
                 return AnalysisResult(
                     input_type='image',
                     summary=f"Image analysis: {width}x{height} {mode} image",
@@ -196,7 +196,7 @@ Provide:
                     code_fixes=code_fixes,
                     confidence=0.75,
                 )
-            
+
             except ModelError as e:
                 return AnalysisResult(
                     input_type='image',
@@ -206,13 +206,13 @@ Provide:
                     code_fixes=[],
                     confidence=0.0,
                 )
-        
+
         finally:
             try:
                 os.unlink(temp_path)
             except OSError:
                 pass
-    
+
     async def analyze_code_file(self, file_data: bytes, filename: str, context: str = "") -> AnalysisResult:
         """Analyze a code file for issues, improvements, and patterns."""
         try:
@@ -226,9 +226,9 @@ Provide:
                 code_fixes=[],
                 confidence=0.0,
             )
-        
+
         language = self._detect_language(filename)
-        
+
         prompt = f"""Analyze this {language} code file for issues and improvements.
 
 File: {filename}
@@ -246,7 +246,7 @@ Provide:
 4. Missing tests or edge cases
 5. Refactoring opportunities
 6. Confidence level (0.0-1.0)"""
-        
+
         try:
             reply = await self.router.generate(
                 messages=[
@@ -257,11 +257,11 @@ Provide:
                 data_class="source",
                 max_tokens=2000,
             )
-            
+
             analysis_text = reply.text
             suggested_actions = []
             code_fixes = []
-            
+
             # Extract fixes from analysis
             for line in analysis_text.split('\n'):
                 line = line.strip()
@@ -270,7 +270,7 @@ Provide:
                         action = line.lstrip('- *•0123456789. ')
                         if action:
                             suggested_actions.append(action)
-            
+
             return AnalysisResult(
                 input_type='file',
                 summary=f"Code analysis: {filename} ({len(code)} chars, {language})",
@@ -279,7 +279,7 @@ Provide:
                 code_fixes=code_fixes,
                 confidence=0.8,
             )
-        
+
         except ModelError as e:
             return AnalysisResult(
                 input_type='file',
@@ -289,7 +289,7 @@ Provide:
                 code_fixes=[],
                 confidence=0.0,
             )
-    
+
     async def analyze_video(self, video_data: bytes, filename: str, context: str = "") -> AnalysisResult:
         """Analyze a video (screen recording of bug reproduction)."""
         # For video, we'd ideally extract key frames and analyze them
@@ -307,7 +307,7 @@ Provide:
             code_fixes=[],
             confidence=0.5,
         )
-    
+
     async def analyze_audio(self, audio_data: bytes, filename: str, context: str = "") -> AnalysisResult:
         """Analyze audio (voice command)."""
         # In production, you'd use speech-to-text (Whisper, etc.)
@@ -323,7 +323,7 @@ Provide:
             code_fixes=[],
             confidence=0.4,
         )
-    
+
     def _detect_language(self, filename: str) -> str:
         ext = Path(filename).suffix.lower()
         return {
@@ -334,7 +334,7 @@ Provide:
             '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
             '.toml': 'toml', '.md': 'markdown',
         }.get(ext, 'text')
-    
+
     async def process_multimodal_input(self, input_data: MultimodalInput, context: str = "") -> AnalysisResult:
         """Route input to appropriate analyzer based on type."""
         if input_data.input_type == 'image':
@@ -388,18 +388,18 @@ def format_analysis_result(result: AnalysisResult) -> str:
         f"**Summary:** {result.summary}",
         f"**Confidence:** {result.confidence:.0%}",
     ]
-    
+
     if result.details:
         lines.append(f"\n**Details:**\n{result.details[:1500]}")
-    
+
     if result.suggested_actions:
         lines.append("\n**Suggested Actions:**")
         for i, action in enumerate(result.suggested_actions, 1):
             lines.append(f"  {i}. {action}")
-    
+
     if result.code_fixes:
         lines.append("\n**Code Fixes:**")
         for fix in result.code_fixes:
             lines.append(f"  • {fix.get('file_path', 'unknown')}: {fix.get('issue', '')} → {fix.get('fix', '')}")
-    
+
     return "\n".join(lines)
