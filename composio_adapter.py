@@ -77,6 +77,23 @@ def _safe_scopes(value: Any) -> list[str]:
     return []
 
 
+def _github_connection_only_policy(auth_config_id: str) -> dict:
+    """Explicit Railway env fallback: allow a GitHub Connect Link, zero tool calls.
+
+    No Composio SDK or user-supplied action policy is inferred from the ID.
+    """
+    if (not isinstance(auth_config_id, str)
+            or not _IDENTIFIER.fullmatch(auth_config_id)
+            or auth_config_id.startswith("replace-with-")):
+        raise ValueError("Invalid GitHub auth-config ID for connection-only mode")
+    return {
+        "autonomy": "observe",
+        "connections": {"github": auth_config_id},
+        "github_repository_allowlist": [],
+        "actions": [],
+    }
+
+
 @dataclass(frozen=True)
 class Action:
     slug: str
@@ -148,10 +165,23 @@ class CapabilityPolicy:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> CapabilityPolicy:
         env = os.environ if env is None else env
-        path = env.get("MAX_COMPOSIO_POLICY_FILE", "")
-        if not _flag(env.get("MAX_COMPOSIO_ENABLED")) or not path:
+        path = (env.get("MAX_COMPOSIO_POLICY_FILE") or "").strip()
+        if not _flag(env.get("MAX_COMPOSIO_ENABLED")):
             return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
-        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        auth_id = (env.get("MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID") or "").strip()
+        if not path:
+            if not auth_id:
+                return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
+            document = _github_connection_only_policy(auth_id)
+        else:
+            try:
+                document = json.loads(Path(path).read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                # Deliberately configured env ID is the ONLY fileless fallback.
+                # Malformed/unreadable existing policy files never fall back.
+                if not auth_id:
+                    raise
+                document = _github_connection_only_policy(auth_id)
         return cls(document, emergency_off=_flag(env.get("MAX_EXTERNAL_ACTIONS_DISABLED")))
 
     def decide(self, account_id: str, slug: str) -> tuple[Action, str]:
@@ -236,14 +266,32 @@ def composio_setup_issues(environ: Mapping[str, str] | None = None) -> tuple[str
         issues.append("MAX_COMPOSIO_ENABLED is off; enable it only after the private policy is ready.")
     if not str(env.get("COMPOSIO_API_KEY") or "").strip():
         issues.append("COMPOSIO_API_KEY is missing; set it privately in the service environment.")
-    path = env.get("MAX_COMPOSIO_POLICY_FILE", "").strip()
+    path = (env.get("MAX_COMPOSIO_POLICY_FILE") or "").strip()
+    auth_id = (env.get("MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID") or "").strip()
+
+    def check_connection_only() -> None:
+        if not auth_id:
+            issues.append(
+                "No private Composio policy file is available. For GitHub "
+                "connection-only mode, configure MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID "
+                "with the real dashboard auth-config ID."
+            )
+            return
+        try:
+            _github_connection_only_policy(auth_id)
+        except ValueError:
+            issues.append(
+                "MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID is invalid or a placeholder; "
+                "use the actual GitHub auth-config ID from the Composio dashboard."
+            )
+
     if not path:
-        issues.append("MAX_COMPOSIO_POLICY_FILE is missing; point it to a private JSON policy file.")
+        check_connection_only()
     else:
         try:
             document = json.loads(Path(path).read_text(encoding="utf-8"))
         except FileNotFoundError:
-            issues.append("The configured private policy file was not found in this running environment.")
+            check_connection_only()
         except (OSError, UnicodeError, json.JSONDecodeError):
             issues.append("The configured private policy file is unreadable or invalid JSON.")
         else:
@@ -252,10 +300,10 @@ def composio_setup_issues(environ: Mapping[str, str] | None = None) -> tuple[str
             except (ValueError, TypeError):
                 issues.append("The private Composio policy failed schema validation.")
             else:
-                auth_id = policy.connections.get("github")
-                if not auth_id:
+                configured_id = policy.connections.get("github")
+                if not configured_id:
                     issues.append("The private Composio policy lacks a GitHub auth config in connections.")
-                elif auth_id.startswith("replace-with-"):
+                elif configured_id.startswith("replace-with-"):
                     issues.append("The GitHub auth-config ID is still a placeholder; use the real dashboard ID.")
     if _flag(env.get("MAX_EXTERNAL_ACTIONS_DISABLED")):
         issues.append("MAX_EXTERNAL_ACTIONS_DISABLED is on; this emergency switch also disables connections.")
