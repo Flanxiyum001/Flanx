@@ -669,7 +669,13 @@ async def on_message(message):
     else:
         remainder = _strip_name_trigger(text)
 
-    # Handle multimodal attachments if present
+    # Never inspect attachments or reply to unrelated server messages.
+    # Prefix commands still pass through discord.py's normal dispatcher.
+    if remainder is None:
+        await bot.process_commands(message)
+        return
+
+    # Handle multimodal attachments only when Max is addressed
     if getattr(message, "attachments", None):
         async with message.channel.typing():
             analyses = await handle_discord_attachments(message, context=message.content)
@@ -683,7 +689,7 @@ async def on_message(message):
     channel = message.channel
     # The knowledge graph can contain source-derived fixes from private repositories.
     # Treat knowledge retrieval as a GitHub-scoped operation, not public chat.
-    uses_github = intent in {"fix", "review", "brain", "knowledge"} or (
+    uses_github = intent in {"fix", "review", "brain", "knowledge", "proactive", "insights"} or (
         intent == "integration" and payload["name"] in {"repos", "lessons"}
     )
     if uses_github and not github_user_allowed(message.author.id):
@@ -761,7 +767,8 @@ async def on_message(message):
                 f"```\n{clip(formatted, 1700)}\n```"
             )
         elif intent == "proactive":
-            msg = await proactive_engine.generate_proactive_response(
+            msg = await asyncio.to_thread(
+                proactive_engine.generate_proactive_message,
                 message.author.id, goal=payload.get("query")
             )
             if msg:
@@ -769,19 +776,15 @@ async def on_message(message):
             else:
                 await channel.send("💡 No proactive suggestions right now. Keep coding!")
         elif intent == "insights":
-            insights = proactive_engine.get_personalized_insights(message.author.id)
+            insights = await asyncio.to_thread(
+                proactive_engine.get_personalized_insights, message.author.id
+            )
             await channel.send(insights)
         elif intent == "background":
-            task = notification_system.create_task(
-                user_id=message.author.id,
-                channel_id=channel.id,
-                task_type="background_job",
-                description=payload.get("query", "Background Task"),
-            )
             await channel.send(
-                f"⚙️ **Background Task Started** (`{task.task_id}`)\n"
-                f"Description: `{task.description}`\n"
-                "I will notify you here and via DM when complete."
+                "Background task execution is not available yet. "
+                "No task was started or scheduled. Use an existing command "
+                "for a task I can actually perform now."
             )
         elif intent == "brain":
             repo = payload["repo"]
@@ -1395,10 +1398,17 @@ async def max_knowledge(ctx):
 @bot.command(name="max_proactive")
 async def max_proactive(ctx, *, goal: str = None):
     """Trigger proactive assistance suggestions."""
+    if not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
+        return
     if goal:
-        msg = proactive_engine.generate_proactive_message(ctx.author.id, goal=goal)
+        msg = await asyncio.to_thread(
+            proactive_engine.generate_proactive_message, ctx.author.id, goal=goal
+        )
     else:
-        msg = proactive_engine.get_personalized_insights(ctx.author.id)
+        msg = await asyncio.to_thread(
+            proactive_engine.get_personalized_insights, ctx.author.id
+        )
     if msg:
         await ctx.send(msg)
     else:
@@ -1408,18 +1418,10 @@ async def max_proactive(ctx, *, goal: str = None):
 @bot.command(name="max_background")
 async def max_background(ctx, *, description: str):
     """Start a background task with completion notifications."""
-    task = notification_system.create_task(
-        user_id=ctx.author.id,
-        channel_id=ctx.channel.id,
-        task_type="background_job",
-        description=description,
-        notify_channel=True,
-        notify_dm=True,
-    )
     await ctx.send(
-        f"⚙️ **Background Task Started** (`{task.task_id}`)\n"
-        f"Description: `{task.description}`\n"
-        "I will notify you here and via DM when the task completes."
+        "Background task execution is not available yet. "
+        "No task was started or scheduled. Use an existing command "
+        "for a task I can actually perform now."
     )
 
 
@@ -1427,7 +1429,7 @@ async def max_background(ctx, *, description: str):
 async def max_bg_status(ctx, task_id: str):
     """Check background task status."""
     task = notification_system.get_task(task_id)
-    if task:
+    if task is not None and task.user_id == ctx.author.id:
         await ctx.send(f"Background task `{task_id}`: status=`{task.status}`, created at {task.created_at[:16]}")
     else:
         await ctx.send(f"Unknown background task `{task_id}`.")
