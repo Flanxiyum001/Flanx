@@ -402,19 +402,20 @@ CHAT_HELP = (
     "• `max help me with src/app.js in owner/repo — <what to change>`\n"
     "• Mention this bot, then ask it to fix a file in owner/repo\n"
     "• `@Max fix src/app.js in owner/repo: <what to change>`\n"
-    "• `max search <query> for me`\n"
+    "• In a DM: `search Python release notes` (no Max prefix needed)\n"
     "• `max what do you remember about owner/repo`\n"
     "• `max stats` — token usage, estimated cost and sandbox quota\n"
     "• `max set timezone Asia/Kolkata` · `max what time is it`\n"
     "• `max remember <anything>` · `max show notes`\n"
-    "• `max integrations` — list the pluggable modules\n"
+    "• `integrations` — list pluggable modules\n"
     "• `max which repositories can you access?` — private GitHub visibility report\n"
     "• `max knowledge` — query cross-repo knowledge graph\n"
-    "• `max proactive <goal>` — get predictive suggestions\n"
-    "• `max insights` — personalized recommendations\n"
+    "• `proactive <goal>` — get predictive suggestions\n"
+    "• `insights` — personalized recommendations\n"
     "• Background execution is not yet available; no tasks run asynchronously.\n"
-    "• `max email summary to user@example.com` — send an email summary\n"
-    "Prefix commands still work: `!max_fix`, `!update_repo`, `!max_brain`, `!max_stats`."
+    "• `send email to user@example.com subject Hello body Message` — owner only\n"
+    "DM Max directly without a prefix. In servers, mention Max or use an owner-only opted-in channel.\n"
+    "Legacy `!` commands still work."
 )
 
 PERSONA_CARD = (
@@ -432,7 +433,7 @@ PERSONA_CARD = (
     "**Multimodal:** Drag & drop images/files — I analyze UI bugs and code files.\n"
     "**Background Tasks:** execution is not configured; Max does not claim tasks have started.\n"
     "**Email:** `max email summary to user@example.com` — send summaries and digests.\n"
-    "No prefix needed — just start with `max` or tag me. (`flanx` remains a supported alias.)"
+    "In DMs, speak naturally without a prefix. In servers, mention me, use `max`, or opt in an owner channel."
 )
 
 FILE_EXT_PATTERN = (
