@@ -95,11 +95,15 @@ class MultimodalProcessor:
     
     async def process_attachment(self, attachment: discord.Attachment, user_id: int) -> MultimodalInput:
         """Download and process a Discord attachment."""
-        if attachment.size > MAX_FILE_SIZE:
-            raise ValueError(f"File too large: {attachment.size} bytes (max {MAX_FILE_SIZE})")
-        
         input_type = self.detect_input_type(attachment)
+        limit = MAX_IMAGE_SIZE if input_type == "image" else MAX_FILE_SIZE
+        if attachment.size > limit:
+            raise ValueError(f"Attachment exceeds the allowed size limit ({limit} bytes)")
+        
         content = await attachment.read()
+        # Trust the bytes received, not only Discord's advertised size.
+        if len(content) > limit:
+            raise ValueError(f"Attachment exceeds the allowed size limit ({limit} bytes)")
         
         return MultimodalInput(
             input_type=input_type,
@@ -130,7 +134,9 @@ class MultimodalProcessor:
             # Resize if too large (max 1024px on longest side for analysis)
             if max(width, height) > 1024:
                 img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-            img.save(buffered, format=img.format or 'PNG')
+            # Normalize to PNG so the data URL matches the actual encoded bytes.
+            img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+            img.save(buffered, format="PNG", optimize=True)
             img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
             
             # Analyze with vision-capable model
@@ -162,7 +168,9 @@ Provide:
                         ]}
                     ],
                     task="review",
-                    data_class="public",
+                    # User screenshots can contain private code, tokens, or personal data.
+                    # Route through the source-data policy instead of implicitly treating them as public.
+                    data_class="source",
                     max_tokens=1500,
                 )
                 
@@ -360,10 +368,11 @@ async def handle_discord_attachments(message: discord.Message, context: str = ""
             input_data = await multimodal_processor.process_attachment(attachment, message.author.id)
             result = await multimodal_processor.process_multimodal_input(input_data, context)
             results.append(result)
-        except Exception as e:
+        except Exception:
+            # Avoid echoing untrusted exception text or remote service details into Discord.
             results.append(AnalysisResult(
                 input_type='error',
-                summary=f"Failed to process {attachment.filename}: {e}",
+                summary=f"Failed to process {attachment.filename}. Check the file type, size, and model configuration.",
                 details="",
                 suggested_actions=[],
                 code_fixes=[],
