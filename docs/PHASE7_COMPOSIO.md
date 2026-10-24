@@ -50,6 +50,137 @@ accounts or increasing volume. No paid plan is assumed by Max.
    an uncertain write; use `!max_tool_status <task_id>` and read-only service
    inspection to reconcile it.
 
+## GitHub read-only rollout (NVIDIA integration increment)
+
+This rollout **refuses all configured GitHub actions classified as writes**,
+including `trusted_autonomy`. It does not authorize publishing, PR merges,
+repository modification, or deployment. A connected GitHub account alone does
+not grant any action permissions.
+
+1. In the [Composio dashboard](https://app.composio.dev/), choose the intended
+   Composio project and inspect **GitHub** under toolkit/authentication setup.
+   Create or select an auth config with minimal GitHub read permissions. Keep
+   the real auth-config ID private; do not invent it.
+2. Use the hosted connection flow with `!max_connect github` in a DM from an
+   authorized owner. Complete the hosted consent link yourself. Inspect
+   `!max_connections` or `!max_connection_status github` in DM. The
+   connection belongs to the derived `max-discord-<DiscordID>` owner.
+3. Discover the exact read-only GitHub action slugs, input JSON Schemas and
+   toolkit versions in the real account using Composio's SDK/toolkit catalog.
+   Do not substitute example placeholders or use `latest` without a pinned
+   version. Supported account-inventory candidates are listed below.
+4. Copy `docs/composio-policy.example.json` to
+   `.max_state/composio-policy.json` (an ignored/private location). Set
+   `MAX_COMPOSIO_POLICY_FILE` to that exact location. Populate the real
+   `connections.github` auth-config ID, the precise connected account ID,
+   `user_id=max-discord-<DiscordID>`, exact discovered action slugs and
+   versions. Set `github_repository_allowlist` only to reviewed `owner/repo`
+   names. `actions` must remain `risk=read`.
+5. Configure `MAX_OWNER_DISCORD_IDS`, `MAX_GITHUB_ALLOWED_USER_IDS`,
+   `COMPOSIO_API_KEY`, `MAX_COMPOSIO_ENABLED=true`, and
+   `MAX_EXTERNAL_ACTIONS_DISABLED=false` only in an explicitly approved
+   **test** bot environment. The kill switches default to disabled.
+6. Verify via owner DM: `!max_capabilities`, `!max_github_repos`, and then
+   `!max_tool <account_id> <EXACT_READ_SLUG> {}` only if the discovered input
+   schema accepts empty arguments. For nonempty inputs, validate exact fields
+   and repository scope. Unauthorized or cross-account requests must fail.
+   No live credentials are required for CI tests.
+
+The generic external action entrypoint now rechecks authenticated owner,
+GitHub-specific user allowlist, and connected-account owner before every read.
+The SDK, model and tool results remain isolated. Structured model-generated
+tool invocation remains disabled pending a separately reviewed orchestrator.
+
+See [NVIDIA model configuration](NVIDIA_NEMOTRON.md) for the independent
+inference provider.
+
+## Railway connection-only setup without a policy file
+
+If `!max_composio_status` says the private policy file is missing, **do not
+turn off authorization or commit a policy file containing private IDs**. Railway
+can use an explicit, strictly limited environment-only fallback to create a
+GitHub hosted Connect Link with **zero executable actions**.
+
+1. Open the [Composio dashboard](https://app.composio.dev/) and select the
+   intended Composio project. Go to **Platform → Auth Configs → Create Auth
+   Config**, choose GitHub and create/identify the minimum-scope auth config.
+   Copy the actual **auth config ID** from that project (not the connected
+   account ID and not the Composio API key). The config must already exist.
+2. In Railway's **private service variables**, configure:
+
+   ```dotenv
+   MAX_COMPOSIO_ENABLED=true
+   COMPOSIO_API_KEY=<existing-real-project-API-key>
+   MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID=<real-GitHub-auth-config-ID>
+   MAX_EXTERNAL_ACTIONS_DISABLED=false
+   ```
+
+   Keep `MAX_OWNER_DISCORD_IDS` correctly scoped to your Discord owner.
+   `MAX_COMPOSIO_POLICY_FILE` may remain
+   `.max_state/composio-policy.json`. If that file is missing, the explicit
+   `MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID` is used **only** to build this
+   connection-only policy in memory:
+   `{"autonomy":"observe","connections":{"github":"<your-auth-config-id>"},"github_repository_allowlist":[],"actions":[]}`.
+   This does **not** enable tools, reads, writes, merges or deployments.
+3. **Restart/redeploy the explicitly selected test service** after updating
+   its private variables. DM `!max_composio_status`: the report should say
+   locally valid (not live-verified). Then DM `!max_connect github` and
+   complete the privately delivered hosted link. Run
+   `!max_connection_status github` to confirm `ACTIVE`. Connect Links can
+   expire; generate a new link if needed.
+4. If a real policy file **exists**, it always takes precedence. An invalid or
+   unreadable existing file is an error; the environment fallback cannot
+   override it. An invalid/placeholder auth config ID fails closed too.
+   `MAX_COMPOSIO_ENABLED=false` and
+   `MAX_EXTERNAL_ACTIONS_DISABLED=true` remain authoritative kill switches.
+
+After connecting, `!max_github_repos` and `!max_tool` remain unavailable
+until a **separately reviewed, correctly scoped private policy file** provides
+exact read-only action entries and the required requester/repository permissions.
+The fallback exists **only** to authorize the owner to open a hosted consent
+link without requiring a persistent policy file.
+
+## Diagnose `max connect github` reporting disabled
+
+The connection handler checks owner authorization **first**. If the owner
+passes but the adapter was disabled or failed to initialize, no Connect Link
+or GitHub authorization request is attempted.
+
+1. In a **DM** from the authorized Discord owner, run
+   `!max_composio_status`. The command reports missing settings, missing
+   or malformed private policy JSON, missing GitHub auth config, sample
+   placeholder IDs, and the emergency disable switch. It **never returns**
+   API key values, private policy contents, account IDs, or OAuth links.
+2. In your Composio dashboard, select the intended project, create a
+   minimally scoped GitHub **auth config**, and find its **real** auth-config
+   ID. The auth-config ID is not the API key and not a connected-account ID.
+3. Place a private JSON file at the container path named by
+   `MAX_COMPOSIO_POLICY_FILE`, following
+   `docs/composio-policy.example.json`. For connecting **only**, start
+   with `{"autonomy":"observe","connections":{"github":"<actual-auth-config-id>"},"github_repository_allowlist":[],"actions":[]}`.
+   This enables the hosted consent link but enables **zero GitHub tools**.
+   Do not paste any real key, private ID, or token into your Git repo.
+4. Set `COMPOSIO_API_KEY` privately, `MAX_COMPOSIO_ENABLED=true`,
+   and after verifying the test account and policy,
+   `MAX_EXTERNAL_ACTIONS_DISABLED=false`. Keep the owner allowlist
+   `MAX_OWNER_DISCORD_IDS` valid (legacy approver fallback works **only**
+   when the primary variable is absent).
+5. **Railway:** `.max_state/` is gitignored, so the policy file is not
+   deployed with GitHub code. Put it on a mounted persistent volume or
+   provision it securely in the container before bot startup. The value of
+   `MAX_COMPOSIO_POLICY_FILE` must be an **absolute or correctly
+   resolved path inside the Railway container**, not a PC file path.
+   Files outside a volume are ephemeral and can disappear at redeployment.
+6. Restart the test bot and DM `!max_composio_status` again. A
+   locally ready report **does not prove Composio credentials are valid**.
+   Next DM `!max_connect github`, complete the private hosted consent
+   link, and check `!max_connection_status github`.
+   Enabling a GitHub connection **never enables repository writes**.
+
+If the status command reports that the policy file is missing, toggling
+`MAX_COMPOSIO_ENABLED=true` alone does not fix it. Do not alter the
+Composio emergency switch before the owner reviews the policy.
+
 ## Conversational connections
 
 The optional `composio==0.18.2` SDK provides `connected_accounts.link`, `list`,

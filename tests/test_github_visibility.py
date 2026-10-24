@@ -66,6 +66,9 @@ class FakeGitHubSDK:
 class GitHubVisibilityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.env_patch = patch.dict("os.environ", {"MAX_OWNER_DISCORD_IDS": "42",
+                                                  "MAX_GITHUB_ALLOWED_USER_IDS": "42"})
+        self.env_patch.start()
         self.sdk = FakeGitHubSDK()
         self.adapter = ComposioAdapter(policy(), client=self.sdk)
         root = Path(self.temp.name)
@@ -73,6 +76,7 @@ class GitHubVisibilityTests(unittest.IsolatedAsyncioTestCase):
                                              audit_path=str(root / "audit.db"))
 
     def tearDown(self):
+        self.env_patch.stop()
         self.temp.cleanup()
 
     async def test_actual_identity_repositories_and_api_permissions(self):

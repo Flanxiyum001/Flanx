@@ -26,6 +26,8 @@ PRIVATE_DATA = frozenset({"chat", "private_repo", "source", "memory"})
 LOG = logging.getLogger(__name__)
 DEFAULT_LOCAL_MODEL = "qwen3:8b"
 DEFAULT_VISION_MODEL = "qwen3-vl:8b"
+DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 _LABELED_SECRET = re.compile(
     r"(?i)\b[A-Za-z0-9_]{0,40}(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|"
     r"authorization|cookie|client[_-]?secret|private[_-]?key|credential|token|secret)"
@@ -103,6 +105,9 @@ class RouterConfig:
     input_chars: int
     keep_alive: str
     auto_cloud_fallback: bool = False
+    nvidia_url: str = DEFAULT_NVIDIA_BASE_URL
+    nvidia_model: str = DEFAULT_NVIDIA_MODEL
+    nvidia_key: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RouterConfig:
@@ -131,6 +136,9 @@ class RouterConfig:
             input_chars=_positive_int(env, "MAX_MODEL_INPUT_CHARS", 50000),
             keep_alive=env.get("MAX_OLLAMA_KEEP_ALIVE", "0"),
             auto_cloud_fallback=_enabled(env, "MAX_AUTO_CLOUD_FALLBACK"),
+            nvidia_url=(env.get("NVIDIA_BASE_URL") or DEFAULT_NVIDIA_BASE_URL).rstrip("/"),
+            nvidia_model=(env.get("NVIDIA_MODEL") or DEFAULT_NVIDIA_MODEL).strip(),
+            nvidia_key=env.get("NVIDIA_API_KEY", "").strip(),
         )
 
 
@@ -168,11 +176,12 @@ class ModelReply:
 
 class ModelRouter:
     def __init__(self, config: RouterConfig | None = None, *, local_client=None,
-                 cloud_client=None, environ: Mapping[str, str] | None = None):
+                 cloud_client=None, nvidia_client=None, environ: Mapping[str, str] | None = None):
         self.env = dict(os.environ if environ is None else environ)
         self.config = config or RouterConfig.from_env(self.env)
         self.local_client = local_client
         self.cloud_client = cloud_client
+        self.nvidia_client = nvidia_client
         self._local_slots = asyncio.Semaphore(self.config.local_concurrency)
         self._cloud_slots = asyncio.Semaphore(self.config.cloud_concurrency)
         self._inference_history: OrderedDict[str, InferenceMetadata] = OrderedDict()
@@ -199,6 +208,11 @@ class ModelRouter:
 
     def selected_model(self, task: str = "general", *, role: str | None = None,
                        override: str | None = None, provider: str = "local") -> str:
+        if provider == "nvidia":
+            if role is not None and role not in ROLE_TASKS:
+                raise ModelError("configuration", "Unknown specialist role.")
+            # NVIDIA uses its own model ID; never inherit Ollama or FreeLLM routes.
+            return override or self.config.nvidia_model
         if role:
             if role not in ROLE_TASKS:
                 raise ModelError("configuration", "Unknown specialist role.")
@@ -223,15 +237,17 @@ class ModelRouter:
         target = self.config.provider
         if target == "auto":
             return "auto (Ollama first; FreeLLM fallback configured)" if self.config.auto_cloud_fallback else "auto (Ollama only)"
+        if target == "nvidia":
+            return "NVIDIA Nemotron (explicit opt-in)"
         return "FreeLLM" if target in {"freellm", "cloud"} else "Ollama"
 
-    def _cloud_permission(self, classes: tuple[str, ...]) -> None:
+    def _cloud_permission(self, classes: tuple[str, ...], provider_name: str = "FreeLLM") -> None:
         cfg = self.config
         if cfg.policy != "cloud_allowed":
-            raise ModelError("provider_disabled", "FreeLLM is disabled by MAX_INFERENCE_POLICY; set cloud_allowed to enable it.")
+            raise ModelError("provider_disabled", f"{provider_name} is disabled by MAX_INFERENCE_POLICY; set cloud_allowed to enable it.")
         if any(item in PRIVATE_DATA and not cfg.allow_cloud_private
                and item not in cfg.allowed_private_classes for item in classes):
-            raise ModelError("privacy_blocked", "Privacy policy blocks FreeLLM for this data class. Use Ollama or explicitly approve this class.")
+            raise ModelError("privacy_blocked", f"Privacy policy blocks {provider_name} for this data class. Use Ollama or explicitly approve this class.")
 
     def _cloud_configuration(self) -> None:
         cfg = self.config
@@ -246,6 +262,23 @@ class ModelRouter:
         if not valid:
             raise ModelError("configuration", "FreeLLM requires AI_BASE_URL set to its HTTP(S) OpenAI-compatible API base URL without embedded credentials.")
 
+    def _nvidia_configuration(self) -> None:
+        cfg = self.config
+        # Always require credentials even when a mocked client was injected.
+        if not cfg.nvidia_key:
+            raise ModelError("missing_credentials", "NVIDIA requires NVIDIA_API_KEY.")
+        try:
+            endpoint = urlsplit(cfg.nvidia_url)
+            valid = (endpoint.scheme == "https" and bool(endpoint.hostname)
+                     and not (endpoint.username or endpoint.password or endpoint.query
+                              or endpoint.fragment))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ModelError("configuration", "NVIDIA_BASE_URL must be an HTTPS API base URL without credentials.")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}", cfg.nvidia_model):
+            raise ModelError("configuration", "NVIDIA_MODEL is invalid.")
+
     async def generate(self, messages: list[dict[str, str]], *, task: str = "general",
                        role: str | None = None, model: str | None = None,
                        provider: str | None = None,
@@ -254,7 +287,7 @@ class ModelRouter:
                        max_tokens: int | None = None) -> ModelReply:
         requested = provider if provider is not None else self.config.provider
         requested = requested.strip().lower() if isinstance(requested, str) else "invalid"
-        if requested not in {"local", "freellm", "cloud", "auto"}:
+        if requested not in {"local", "freellm", "cloud", "auto", "nvidia"}:
             requested = "invalid"
         trace = {"selected_provider": None, "configured_model": None,
                  "fallback_attempted": False, "fallback_used": False}
@@ -273,7 +306,7 @@ class ModelRouter:
                 messages, task=task, role=role, model=model, provider=provider,
                 data_class=data_class, temperature=temperature,
                 max_tokens=max_tokens, trace=trace)
-            actual = {"ollama": "local", "freellm": "freellm"}.get(reply.provider)
+            actual = {"ollama": "local", "freellm": "freellm", "nvidia": "nvidia"}.get(reply.provider)
             if actual is None or actual != trace["selected_provider"]:
                 raise ModelError("malformed_response", "The selected model adapter returned invalid routing metadata.")
             trace["selected_provider"] = actual
@@ -302,7 +335,7 @@ class ModelRouter:
         target = (provider or cfg.provider).strip().lower()
         if target == "cloud":
             target = "freellm"  # compatibility with the existing configuration
-        if target not in ("local", "freellm", "auto") or cfg.policy not in ("local_only", "cloud_allowed"):
+        if target not in ("local", "freellm", "auto", "nvidia") or cfg.policy not in ("local_only", "cloud_allowed"):
             raise ModelError("configuration", "Inference provider or privacy policy is invalid.")
         classes = (data_class,) if isinstance(data_class, str) else data_class
         if not isinstance(classes, tuple) or not classes or any(
@@ -331,6 +364,17 @@ class ModelRouter:
             raise ModelError("configuration", "Invalid model messages.")
         if sum(len(m["content"]) for m in messages) > cfg.input_chars:
             raise ModelError("context_limit", "The request exceeds MAX_MODEL_INPUT_CHARS. Shorten its context.")
+        if target == "nvidia":
+            self._cloud_permission(classes, "NVIDIA")
+            cloud_messages = _redact_cloud_messages(messages)
+            if cloud_messages != messages:
+                raise ModelError("privacy_blocked", "Credentials or authentication material cannot be sent to NVIDIA. Remove them from the request.")
+            self._nvidia_configuration()
+            chosen = self.selected_model(task, role=role, override=model, provider="nvidia")
+            trace["selected_provider"] = "nvidia"
+            trace["configured_model"] = chosen
+            async with self._cloud_slots:
+                return await self._nvidia(cloud_messages, chosen, temperature, max_tokens)
         if target == "freellm":
             self._cloud_permission(classes)
             cloud_messages = _redact_cloud_messages(messages)
@@ -454,6 +498,59 @@ class ModelRouter:
             if "timeout" in type(exc).__name__.lower():
                 raise ModelError("timeout", "FreeLLM request timed out.") from None
             raise ModelError("unavailable", "FreeLLM connection failed or its endpoint is unavailable; check AI_BASE_URL.") from None
+        finally:
+            if owned_client is not None:
+                try:
+                    await owned_client.close()
+                except Exception:
+                    pass
+
+
+    async def _nvidia(self, messages, model, temperature, max_tokens) -> ModelReply:
+        """NVIDIA OpenAI-compatible non-streaming chat, without exposing reasoning.
+
+        Tool calls are not enabled. Streaming should be tested separately.
+        """
+        cfg = self.config
+        owned_client = None
+        try:
+            client = self.nvidia_client
+            if client is None:
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=cfg.nvidia_key, base_url=cfg.nvidia_url,
+                                    timeout=cfg.timeout_seconds, max_retries=0)
+                owned_client = client
+            args = {"model": model, "messages": messages, "stream": False,
+                    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+            if temperature is not None:
+                args["temperature"] = temperature
+            if max_tokens is not None:
+                args["max_tokens"] = max_tokens
+            response = await asyncio.wait_for(client.chat.completions.create(**args), cfg.timeout_seconds)
+            if not isinstance(response.choices, (list, tuple)) or not response.choices:
+                raise ValueError("missing completion choice")
+            content = response.choices[0].message.content
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("missing final answer")
+            usage = getattr(response, "usage", None)
+            return ModelReply(content.strip(), getattr(response, "model", None) or model,
+                              _count(getattr(usage, "prompt_tokens", None)),
+                              _count(getattr(usage, "completion_tokens", None)), "nvidia")
+        except asyncio.TimeoutError:
+            raise ModelError("timeout", "NVIDIA request timed out.") from None
+        except (ValueError, IndexError, TypeError, AttributeError, KeyError):
+            raise ModelError("malformed_response", "NVIDIA returned an invalid chat completion.") from None
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status == 429:
+                raise ModelError("rate_limited", "NVIDIA rate limit reached.") from None
+            if status in (401, 403):
+                raise ModelError("authentication", "NVIDIA rejected the key or model access.") from None
+            if status in (400, 404, 405, 422):
+                raise ModelError("rejected", f"NVIDIA rejected the request (HTTP {status}).") from None
+            if "timeout" in type(exc).__name__.lower():
+                raise ModelError("timeout", "NVIDIA request timed out.") from None
+            raise ModelError("unavailable", "NVIDIA connection or endpoint unavailable.") from None
         finally:
             if owned_client is not None:
                 try:
