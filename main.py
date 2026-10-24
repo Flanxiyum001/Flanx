@@ -561,7 +561,7 @@ def _natural_message_text(message) -> str | None:
 def _plain_request(text: str) -> str:
     """Remove bounded courtesy prefixes only for deterministic commands."""
     return re.sub(
-        r"^\\s*(?:(?:please|pls)\\s+|(?:can|could|would)\\s+you\\s+){1,2}",
+        r"^\s*(?:(?:please|pls)\s+|(?:can|could|would)\s+you\s+){1,2}",
         "", text or "", flags=re.IGNORECASE,
     ).strip()
 
@@ -574,24 +574,24 @@ def natural_command_intent(text: str) -> dict | None:
     """
     statement = _plain_request(text).strip().rstrip("?.!").strip()
     fixed = (
-        (r"(?:max_composio_status|(?:check|show|get)\\s+(?:my\\s+)?composio"
-         r"(?:\\s+(?:setup|connection))?\\s+status|composio\\s+status)",
+        (r"(?:max_composio_status|(?:check|show|get)\s+(?:my\s+)?composio"
+         r"(?:\s+(?:setup|connection))?\s+status|composio\s+status)",
          "composio_status"),
-        (r"(?:max_capabilities|(?:show|list|what\\s+are)\\s+(?:my\\s+)?"
-         r"(?:available\\s+)?(?:tools|capabilities))",
+        (r"(?:max_capabilities|(?:show|list|what\s+are)\s+(?:my\s+)?"
+         r"(?:available\s+)?(?:tools|capabilities))",
          "capabilities"),
-        (r"(?:max_inference_status|(?:show|check|get)\\s+(?:my\\s+)?"
-         r"(?:inference|model)\\s+status)",
+        (r"(?:max_inference_status|(?:show|check|get)\s+(?:my\s+)?"
+         r"(?:inference|model)\s+status)",
          "inference_status"),
-        (r"(?:max_connections|(?:show|list)\\s+(?:my\\s+)?connections)",
+        (r"(?:max_connections|(?:show|list)\s+(?:my\s+)?connections)",
          "connections"),
-        (r"(?:max_github_repos|(?:show|list)\\s+(?:my\\s+)?github\\s+repos(?:itories)?)",
+        (r"(?:max_github_repos|(?:show|list)\s+(?:my\s+)?github\s+repos(?:itories)?)",
          "github_repos"),
-        (r"(?:max_voice|(?:join|start)\\s+(?:my\\s+)?voice\\s+channel)",
+        (r"(?:max_voice|(?:join|start)\s+(?:my\s+)?voice\s+channel)",
          "voice_join"),
-        (r"(?:max_voice_leave|(?:leave|stop)\\s+(?:the\\s+)?voice\\s+channel)",
+        (r"(?:max_voice_leave|(?:leave|stop)\s+(?:the\s+)?voice\s+channel)",
          "voice_leave"),
-        (r"(?:max_tool_disable|disable\\s+(?:all\\s+)?composio\\s+tools)",
+        (r"(?:max_tool_disable|disable\s+(?:all\s+)?composio\s+tools)",
          "tool_disable"),
     )
     for pattern, command in fixed:
@@ -599,8 +599,8 @@ def natural_command_intent(text: str) -> dict | None:
             return {"command": command}
 
     connect = re.fullmatch(
-        r"(?:max_connect|connect(?:\\s+(?:to|my))?)\\s+"
-        r"(?P<toolkit>github|google\\s*calendar)",
+        r"(?:max_connect|connect(?:\s+(?:to|my))?)\s+"
+        r"(?P<toolkit>github|google\s*calendar)",
         statement, re.IGNORECASE,
     )
     if connect:
@@ -608,9 +608,9 @@ def natural_command_intent(text: str) -> dict | None:
         return {"command": "connect", "toolkit": toolkit}
 
     tool = re.fullmatch(
-        r"(?:run|execute|call)\\s+(?:composio\\s+)?tool\\s+"
-        r"(?P<account>ca_[A-Za-z0-9_-]{1,120})\\s+"
-        r"(?P<slug>[A-Z][A-Z0-9_]{1,119})(?:\\s+(?P<json>\\{.{0,4000}\\}))?",
+        r"(?:run|execute|call)\s+(?:composio\s+)?tool\s+"
+        r"(?P<account>ca_[A-Za-z0-9_-]{1,120})\s+"
+        r"(?P<slug>[A-Z][A-Z0-9_]{1,119})(?:\s+(?P<json>\{.{0,4000}\}))?",
         statement, re.DOTALL,
     )
     if tool:
