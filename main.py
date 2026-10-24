@@ -1903,7 +1903,7 @@ _voice_sessions: dict[int, VoiceConversation] = {}
 async def max_voice(ctx):
     """Join the caller's voice channel and listen for the local wake phrase."""
     if ctx.guild is None or not isinstance(ctx.author, discord.Member):
-        await ctx.send("Use \`!max_voice\` in a server where you're in a voice channel.")
+        await ctx.send("Use `!max_voice` in a server where you're in a voice channel.")
         return
     owner = owner_access(ctx.author.id)
     if not owner.allowed:
@@ -1917,7 +1917,7 @@ async def max_voice(ctx):
         await ctx.send("Join a voice channel first, then ask me to join.")
         return
     if ctx.guild.id in _voice_sessions:
-        await ctx.send("I'm already listening in a voice channel here. Use \`!max_voice_leave\` first if you want to move me.")
+        await ctx.send("I'm already listening in a voice channel here. Use `!max_voice_leave` first if you want to move me.")
         return
     try:
         from discord.ext import voice_recv
@@ -1943,7 +1943,7 @@ async def max_voice(ctx):
         return
     await ctx.send(
         f"I'm in **{channel.name}** and listening only for your voice. Say **Hey Max** followed by what you want. "
-        "I'll stay in conversation briefly after the wake phrase. Use \`!max_voice_leave\` to stop and disconnect."
+        "I'll stay in conversation briefly after the wake phrase. Use `!max_voice_leave` to stop and disconnect."
     )
 
 
