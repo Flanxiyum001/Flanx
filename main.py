@@ -51,6 +51,7 @@ from knowledge_graph import learn_from_repair, query_knowledge, format_knowledge
 from proactive_assist import proactive_engine, get_proactive_engine
 from multimodal import multimodal_processor, handle_discord_attachments, format_analysis_result
 from notifications import notification_system, get_notification_system
+from voice_conversation import VoiceConversation, VoiceConfigurationError
 
 try:
     from ddgs import DDGS
@@ -1889,6 +1890,82 @@ async def max_memory_delete(ctx, record_id: str):
         await ctx.send("Memory deleted." if deleted else "Unknown memory record.")
     except OSError:
         await ctx.send("Memory storage unavailable.")
+
+
+
+# --------------------------------------------------------------------------
+# Discord voice conversation (local speech recognition and synthesis)
+# --------------------------------------------------------------------------
+_voice_sessions: dict[int, VoiceConversation] = {}
+
+
+@bot.command(name="max_voice", aliases=["max_join"])
+async def max_voice(ctx):
+    """Join the caller's voice channel and listen for the local wake phrase."""
+    if ctx.guild is None or not isinstance(ctx.author, discord.Member):
+        await ctx.send("Use `!max_voice` in a server where you're in a voice channel.")
+        return
+    owner = owner_access(ctx.author.id)
+    if not owner.allowed:
+        await ctx.send("Voice mode is restricted to the configured Max owner.")
+        return
+    if os.getenv("MAX_VOICE_ENABLED", "").strip().lower() not in ("1", "true", "yes", "on"):
+        await ctx.send("Voice mode is disabled. Enable MAX_VOICE_ENABLED=true after installing and configuring local voice models.")
+        return
+    channel = getattr(getattr(ctx.author, "voice", None), "channel", None)
+    if channel is None:
+        await ctx.send("Join a voice channel first, then ask me to join.")
+        return
+    if ctx.guild.id in _voice_sessions:
+        await ctx.send("I'm already listening in a voice channel here. Use `!max_voice_leave` first if you want to move me.")
+        return
+    try:
+        from discord.ext import voice_recv
+        voice = await channel.connect(cls=voice_recv.VoiceRecvClient)
+        session = VoiceConversation(
+            voice_client=voice, loop=asyncio.get_running_loop(),
+            requester_id=ctx.author.id, reply_callback=generate_assistant_reply,
+        )
+        session.start()
+        _voice_sessions[ctx.guild.id] = session
+    except (ImportError, VoiceConfigurationError, RuntimeError, OSError) as exc:
+        voice = ctx.guild.voice_client
+        if voice is not None and voice.is_connected():
+            await voice.disconnect(force=True)
+        await ctx.send(f"I couldn't start voice mode: {str(exc)[:350]}")
+        return
+    except Exception:
+        logging.getLogger(__name__).exception("Could not start Max voice session")
+        voice = ctx.guild.voice_client
+        if voice is not None and voice.is_connected():
+            await voice.disconnect(force=True)
+        await ctx.send("I couldn't start voice mode. Check the bot's server logs and voice setup.")
+        return
+    await ctx.send(
+        f"I'm in **{channel.name}** and listening only for your voice. Say **Hey Max** followed by what you want. "
+        "I'll stay in conversation briefly after the wake phrase. Use `!max_voice_leave` to stop and disconnect."
+    )
+
+
+@bot.command(name="max_voice_leave", aliases=["max_leave"])
+async def max_voice_leave(ctx):
+    """Stop receiving audio and leave the current voice channel."""
+    if ctx.guild is None:
+        await ctx.send("Use this command in the server where Max joined voice.")
+        return
+    owner = owner_access(ctx.author.id)
+    if not owner.allowed:
+        await ctx.send("Only the configured Max owner can stop this voice session.")
+        return
+    session = _voice_sessions.pop(ctx.guild.id, None)
+    voice = ctx.guild.voice_client
+    if session is not None:
+        session.close()
+    if voice is not None and voice.is_connected():
+        await voice.disconnect(force=True)
+        await ctx.send("Voice session stopped. I left the channel.")
+    else:
+        await ctx.send("I'm not connected to voice in this server.")
 
 
 if __name__ == "__main__":
