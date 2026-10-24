@@ -165,23 +165,32 @@ class CapabilityPolicy:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> CapabilityPolicy:
         env = os.environ if env is None else env
-        path = (env.get("MAX_COMPOSIO_POLICY_FILE") or "").strip()
         if not _flag(env.get("MAX_COMPOSIO_ENABLED")):
             return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
+
+        path = (env.get("MAX_COMPOSIO_POLICY_FILE") or "").strip()
+        inline = (env.get("MAX_COMPOSIO_POLICY") or "").strip()
         auth_id = (env.get("MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID") or "").strip()
-        if not path:
-            if not auth_id:
-                return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
-            document = _github_connection_only_policy(auth_id)
-        else:
+        document = None
+
+        if path:
             try:
                 document = json.loads(Path(path).read_text(encoding="utf-8"))
             except FileNotFoundError:
-                # Deliberately configured env ID is the ONLY fileless fallback.
-                # Malformed/unreadable existing policy files never fall back.
-                if not auth_id:
-                    raise
+                # A missing file may use explicitly configured inline policy.
+                # Never mask malformed or unreadable existing policy files.
+                if not inline and auth_id:
+                    document = _github_connection_only_policy(auth_id)
+                elif not inline:
+                    return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
+        elif not inline:
+            if auth_id:
                 document = _github_connection_only_policy(auth_id)
+            else:
+                return cls({"autonomy": "observe", "actions": []}, emergency_off=True)
+
+        if document is None and inline:
+            document = json.loads(inline)
         return cls(document, emergency_off=_flag(env.get("MAX_EXTERNAL_ACTIONS_DISABLED")))
 
     def decide(self, account_id: str, slug: str) -> tuple[Action, str]:
