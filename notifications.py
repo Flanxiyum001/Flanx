@@ -182,7 +182,7 @@ class NotificationSystem:
                 f"Status: {task.status}\n\n"
                 f"Result:\n{task.result_summary or 'No additional details.'}\n"
             )
-            send_email(task.notify_email, subject, body)
+            await asyncio.to_thread(send_email, task.notify_email, subject, body)
 
 
 notification_system = NotificationSystem()
