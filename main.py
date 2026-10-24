@@ -750,7 +750,7 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     # Only enter the code-repair workflow when the user gives a repair/update verb,
     # a repository, or a file path. Ordinary questions should receive an answer.
     if not FIX_VERB_RE.match(stripped):
-        return "general", {"prompt": stripped}
+        return "general", {"prompt": (text or "").strip()}
     return "fix", {
         "repo": repo or default_repo,
         "file": file_path,
