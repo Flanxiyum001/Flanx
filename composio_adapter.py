@@ -132,6 +132,9 @@ class CapabilityPolicy:
                     or type(entry["max_calls"]) is not int or not 1 <= entry["max_calls"] <= 100):
                 raise ValueError("Invalid action policy entry")
             action = Action(**entry)
+            # Phase 7 GitHub integration is read-only regardless of autonomy mode.
+            if action.toolkit == "github" and action.risk != "read":
+                raise ValueError("GitHub write actions are not enabled")
             words = set(action.slug.split("_"))
             if action.risk == "read" and (not (words.intersection(_READ_VERBS)
                                                or action.slug == "GITHUB_WHO_AM_I")
@@ -352,8 +355,10 @@ class ComposioAdapter:
             accounts = await asyncio.wait_for(asyncio.to_thread(
                 client.connected_accounts.list, user_ids=[action.user_id], statuses=["ACTIVE"]), self.timeout)
             entries = _data(accounts).get("items", [])
-            if not any(_data(item).get("id") == account_id and
-                       str(_data(item).get("status", "")).upper() == "ACTIVE" for item in entries):
+            if not any(_data(item).get("id") == account_id
+                       and _data(item).get("user_id") == action.user_id
+                       and str(_data(item).get("status", "")).upper() == "ACTIVE"
+                       for item in entries):
                 raise IntegrationError("connection_expired")
             raw = await asyncio.wait_for(asyncio.to_thread(
                 client.tools.get_raw_composio_tool_by_slug, slug), self.timeout)
@@ -434,7 +439,7 @@ class MockComposioClient:
         self.tools = self
 
     def list(self, *, user_ids, statuses):
-        return {"items": [{"id": "ca_test", "status": "ACTIVE"}]}
+        return {"items": [{"id": "ca_test", "user_id": user_ids[0], "status": "ACTIVE"}]}
 
     def get_raw_composio_tool_by_slug(self, slug):
         return {"slug": slug, "version": "v1", "input_parameters": self.schema}
