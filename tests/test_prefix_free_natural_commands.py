@@ -113,7 +113,7 @@ class NaturalRoutingTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "get_pref", return_value=None), \
              patch.object(main.bot, "process_commands", new_callable=AsyncMock):
             await main.on_message(msg)
-        self.assertIn("max search", msg.channel.send.await_args.args[0].lower())
+        self.assertIn("search python release notes", msg.channel.send.await_args.args[0].lower())
 
     async def test_tool_execution_reuses_approval_and_scope_callback(self):
         msg = message("run tool ca_test GITHUB_WHO_AM_I {}")
