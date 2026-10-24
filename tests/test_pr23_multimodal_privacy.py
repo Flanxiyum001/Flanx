@@ -32,7 +32,7 @@ class MultimodalPrivacyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(kwargs["messages"][1]["images"], list)
         self.assertEqual(len(kwargs["messages"][1]["images"]), 1)
         import base64
-        self.assertTrue(base64.b64decode(kwargs["messages"][1]["images"][0]).startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        self.assertTrue(base64.b64decode(kwargs["messages"][1]["images"][0]).startswith(b"\x89PNG\r\n\x1a\n"))
 
     async def test_attachment_uses_type_specific_size_limit_and_actual_bytes(self):
         processor = multimodal.MultimodalProcessor()
