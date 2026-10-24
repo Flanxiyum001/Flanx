@@ -26,8 +26,13 @@ class MultimodalPrivacyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.input_type, "image")
         kwargs = processor.router.generate.await_args.kwargs
         self.assertEqual(kwargs["data_class"], "source")
-        image_url = kwargs["messages"][1]["content"][1]["image_url"]["url"]
-        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+        self.assertEqual(kwargs["provider"], "local")
+        self.assertEqual(kwargs["task"], "vision")
+        self.assertIsInstance(kwargs["messages"][1]["content"], str)
+        self.assertIsInstance(kwargs["messages"][1]["images"], list)
+        self.assertEqual(len(kwargs["messages"][1]["images"]), 1)
+        import base64
+        self.assertTrue(base64.b64decode(kwargs["messages"][1]["images"][0]).startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
 
     async def test_attachment_uses_type_specific_size_limit_and_actual_bytes(self):
         processor = multimodal.MultimodalProcessor()
