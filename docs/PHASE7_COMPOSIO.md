@@ -94,6 +94,52 @@ tool invocation remains disabled pending a separately reviewed orchestrator.
 See [NVIDIA model configuration](NVIDIA_NEMOTRON.md) for the independent
 inference provider.
 
+## Railway connection-only setup without a policy file
+
+If `!max_composio_status` says the private policy file is missing, **do not
+turn off authorization or commit a policy file containing private IDs**. Railway
+can use an explicit, strictly limited environment-only fallback to create a
+GitHub hosted Connect Link with **zero executable actions**.
+
+1. Open the [Composio dashboard](https://app.composio.dev/) and select the
+   intended Composio project. Go to **Platform → Auth Configs → Create Auth
+   Config**, choose GitHub and create/identify the minimum-scope auth config.
+   Copy the actual **auth config ID** from that project (not the connected
+   account ID and not the Composio API key). The config must already exist.
+2. In Railway's **private service variables**, configure:
+
+   ```dotenv
+   MAX_COMPOSIO_ENABLED=true
+   COMPOSIO_API_KEY=<existing-real-project-API-key>
+   MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID=<real-GitHub-auth-config-ID>
+   MAX_EXTERNAL_ACTIONS_DISABLED=false
+   ```
+
+   Keep `MAX_OWNER_DISCORD_IDS` correctly scoped to your Discord owner.
+   `MAX_COMPOSIO_POLICY_FILE` may remain
+   `.max_state/composio-policy.json`. If that file is missing, the explicit
+   `MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID` is used **only** to build this
+   connection-only policy in memory:
+   `{"autonomy":"observe","connections":{"github":"<your-auth-config-id>"},"github_repository_allowlist":[],"actions":[]}`.
+   This does **not** enable tools, reads, writes, merges or deployments.
+3. **Restart/redeploy the explicitly selected test service** after updating
+   its private variables. DM `!max_composio_status`: the report should say
+   locally valid (not live-verified). Then DM `!max_connect github` and
+   complete the privately delivered hosted link. Run
+   `!max_connection_status github` to confirm `ACTIVE`. Connect Links can
+   expire; generate a new link if needed.
+4. If a real policy file **exists**, it always takes precedence. An invalid or
+   unreadable existing file is an error; the environment fallback cannot
+   override it. An invalid/placeholder auth config ID fails closed too.
+   `MAX_COMPOSIO_ENABLED=false` and
+   `MAX_EXTERNAL_ACTIONS_DISABLED=true` remain authoritative kill switches.
+
+After connecting, `!max_github_repos` and `!max_tool` remain unavailable
+until a **separately reviewed, correctly scoped private policy file** provides
+exact read-only action entries and the required requester/repository permissions.
+The fallback exists **only** to authorize the owner to open a hosted consent
+link without requiring a persistent policy file.
+
 ## Diagnose `max connect github` reporting disabled
 
 The connection handler checks owner authorization **first**. If the owner
