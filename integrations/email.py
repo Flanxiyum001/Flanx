@@ -8,6 +8,8 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from authz import owner_access
+
 NAME = "email"
 DESCRIPTION = "send email notifications, fix summaries, and daily digests"
 USAGE = [
@@ -19,6 +21,7 @@ EMAIL_RE = re.compile(
     r"^\s*(?:send\s+)?email\s+(?:to\s+)?([^\s@]+@[^\s@]+\.[^\s@]+)\s*(?:about|subject:?\s*(.*?))?\s*(?:body:?\s*(.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
+ADDRESS_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
 
 SMTP_HOST = os.getenv("MAX_SMTP_HOST", "smtp.resend.com")
 SMTP_PORT = int(os.getenv("MAX_SMTP_PORT", "587"))
@@ -29,27 +32,34 @@ SENDER_EMAIL = os.getenv("MAX_SENDER_EMAIL", "max@resend.dev")
 
 def match(text: str) -> dict | None:
     m = EMAIL_RE.match(text or "")
-    if m:
-        return {
-            "recipient": m.group(1).strip(),
-            "subject": (m.group(2) or "Notification from Max").strip(),
-            "body": (m.group(3) or "").strip(),
-        }
-    return None
+    if not m:
+        return None
+    return {
+        "recipient": m.group(1).strip(),
+        "subject": (m.group(2) or "Notification from Max").strip(),
+        "body": (m.group(3) or "").strip(),
+    }
 
 
 def send_email(recipient: str, subject: str, body: str, html_body: str | None = None) -> bool:
-    """Send an email using configured SMTP parameters (e.g. Resend, SendGrid)."""
+    """Send one bounded email using configured SMTP parameters."""
     if not SMTP_PASS:
-        print("⚠️ Email dispatch skipped: MAX_SMTP_PASS / RESEND_API_KEY not configured.")
+        return False
+    if not ADDRESS_RE.fullmatch(recipient or ""):
+        return False
+    # Header values must never contain line breaks (prevent header injection).
+    if not subject or len(subject) > 200 or "\r" in subject or "\n" in subject:
+        return False
+    if len(body or "") > 20_000 or (html_body is not None and len(html_body) > 20_000):
+        return False
+    if not ADDRESS_RE.fullmatch(SENDER_EMAIL or ""):
         return False
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = SENDER_EMAIL
     msg["To"] = recipient
-
-    msg.attach(MIMEText(body, "plain"))
+    msg.attach(MIMEText(body or "", "plain"))
     if html_body:
         msg.attach(MIMEText(html_body, "html"))
 
@@ -59,20 +69,32 @@ def send_email(recipient: str, subject: str, body: str, html_body: str | None = 
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SENDER_EMAIL, [recipient], msg.as_string())
         return True
-    except Exception as exc:
-        print(f"⚠️ Email send error: {exc}")
+    except Exception:
+        # Do not log SMTP exceptions; some providers include connection details.
         return False
 
 
 async def handle(event, payload: dict) -> str:
-    recipient = payload["recipient"]
-    subject = payload["subject"] or "Notification from Max"
-    body = payload["body"] or "No body content provided."
+    """Only configured owners may initiate outbound email."""
+    access = owner_access(getattr(event, "author_id", None))
+    if not access.allowed:
+        return "Email sending is restricted to authorized Max owners."
+
+    recipient = str(payload.get("recipient") or "").strip()
+    subject = str(payload.get("subject") or "Notification from Max").strip()
+    body = str(payload.get("body") or "No body content provided.")
+
+    if not ADDRESS_RE.fullmatch(recipient):
+        return "Invalid recipient email address."
+    if not subject or len(subject) > 200 or "\r" in subject or "\n" in subject:
+        return "Invalid email subject."
+    if len(body) > 20_000:
+        return "Email body is too long (maximum 20,000 characters)."
 
     success = send_email(recipient, subject, body)
     if success:
-        return f"📧 **Email sent successfully** to `{recipient}`!\nSubject: *{subject}*"
+        return f"Email sent successfully to `{recipient}`.\nSubject: *{subject}*"
     return (
-        f"⚠️ **Could not send email** to `{recipient}`.\n"
-        "Ensure `RESEND_API_KEY` or `MAX_SMTP_PASS` is set in environment variables."
+        "Could not send email. Check the SMTP configuration and sender-domain "
+        "verification; provider details are intentionally omitted from logs."
     )
