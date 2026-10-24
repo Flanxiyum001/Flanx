@@ -298,7 +298,7 @@ class VoiceConversation:
             try:
                 await finished
             except asyncio.CancelledError:
-                self.voice_client.stop_playing()
+                self._stop_playback()
                 raise
             except Exception as exc:
                 logging.getLogger(__name__).warning("Discord voice playback failed: %s", type(exc).__name__)
