@@ -593,14 +593,11 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "stats", {}
     if EXTENSIONS_RE.match(stripped):
         return "integrations", {}
-    if WHO_RE.match(stripped):
-        return "who", {}
-    if HOWAREYOU_RE.match(stripped):
-        return "howareyou", {}
-    if THANKS_RE.match(stripped):
-        return "thanks", {}
-    if GREETING_RE.match(stripped):
-        return "greeting", {"text": stripped}
+    # Social conversation should use the model too, not canned one-line replies.
+    # Preserve the user's original wording so the assistant can respond naturally.
+    if (WHO_RE.match(stripped) or HOWAREYOU_RE.match(stripped)
+            or THANKS_RE.match(stripped) or GREETING_RE.match(stripped)):
+        return "general", {"prompt": (text or "").strip()}
     if HELP_RE.match(stripped):
         return "help", {}
     if KNOWLEDGE_RE.match(stripped):
@@ -834,8 +831,18 @@ async def on_message(message):
                     await fix_pipeline(channel, repo, file_path, goal, requester_id=message.author.id)
         else:
             await channel.send(CHAT_HELP)
-    except Exception:
-        await channel.send("⚠️ Max could not complete that request. No details were shared.")
+    except Exception as exc:
+        # Keep private exception text out of Discord and logs; provide a traceable ID.
+        error_id = uuid.uuid4().hex[:8]
+        logging.getLogger(__name__).warning(
+            "Unhandled Discord request error id=%s type=%s",
+            error_id, type(exc).__name__,
+        )
+        await channel.send(
+            f"That request hit an unexpected error (reference `{error_id}`). "
+            "Please try once more. If it repeats, send me that reference so the "
+            "failure can be traced instead of guessing at a fix."
+        )
 
     await bot.process_commands(message)
 
@@ -931,10 +938,19 @@ async def generate_assistant_reply(prompt: str, task: str = "general",
                 {
                     "role": "system",
                     "content": (
-                        "You are Max, a friendly personal AI companion. Be useful, clear, "
-                        "and honest about uncertainty. Do not claim to have taken actions "
-                        "unless a tool actually performed them. Keep answers concise unless "
-                        "the user asks for detail."
+                        "You are Max, a capable, warm, natural conversational AI companion. "
+                        "Respond to the actual message as a person would: understand the intent, "
+                        "answer directly, and sound engaged rather than robotic or scripted. "
+                        "Vary your wording naturally; do not repeat stock greetings, disclaimers, "
+                        "or the same closing question. Match the user's tone without copying "
+                        "their mistakes. Be concise by default, but explain fully when the topic "
+                        "needs it. Ask at most one clarifying question, and only when it is "
+                        "genuinely needed. If the user is frustrated, acknowledge the concrete "
+                        "problem and focus on useful next steps instead of generic reassurance. "
+                        "Be honest about uncertainty and limits. Never claim to have run code, "
+                        "searched, changed files, sent messages, or taken any action unless a "
+                        "tool actually did so. If something fails, explain the likely cause and "
+                        "a specific next step; never invent a diagnosis."
                     ),
                 },
                 {"role": "user", "content": prompt},

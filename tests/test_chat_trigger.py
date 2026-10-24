@@ -4,13 +4,21 @@ from main import DIAGNOSTIC_RE, _strip_name_trigger, chat_intent
 
 
 class MaxChatTriggerTests(unittest.TestCase):
-    def test_greetings_addressing_max_are_recognized(self):
+    def test_greetings_addressing_max_use_natural_chat(self):
         for message in ("hi max", "hey max", "hello max", "yo max"):
             with self.subTest(message=message):
                 remainder = _strip_name_trigger(message)
                 self.assertIsNotNone(remainder)
-                intent, _ = chat_intent(remainder)
-                self.assertEqual(intent, "greeting")
+                intent, payload = chat_intent(remainder)
+                self.assertEqual(intent, "general")
+                self.assertTrue(payload["prompt"])
+
+    def test_social_messages_use_the_model_instead_of_canned_replies(self):
+        for message in ("how are you?", "thanks for helping", "who are you?"):
+            with self.subTest(message=message):
+                intent, payload = chat_intent(message)
+                self.assertEqual(intent, "general")
+                self.assertEqual(payload["prompt"], message)
 
     def test_max_prefix_strips_name_and_keeps_request(self):
         self.assertEqual(_strip_name_trigger("max what time is it"), "what time is it")
