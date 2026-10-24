@@ -672,7 +672,7 @@ async def on_message(message):
         remainder = _strip_name_trigger(text)
 
     # Handle multimodal attachments if present
-    if message.attachments:
+    if getattr(message, "attachments", None):
         async with message.channel.typing():
             analyses = await handle_discord_attachments(message, context=message.content)
             for analysis in analyses:
