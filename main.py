@@ -832,16 +832,15 @@ async def on_message(message):
         else:
             await channel.send(CHAT_HELP)
     except Exception as exc:
-        # Keep private exception text out of Discord and logs; provide a traceable ID.
-        error_id = uuid.uuid4().hex[:8]
-        logging.getLogger(__name__).warning(
-            "Unhandled Discord request error id=%s type=%s",
-            error_id, type(exc).__name__,
+        # Keep private exception text out of Discord; retain diagnostic details in server logs.
+        logging.getLogger(__name__).exception(
+            "Unhandled Discord request while processing a message (%s)",
+            type(exc).__name__,
         )
         await channel.send(
-            f"That request hit an unexpected error (reference `{error_id}`). "
-            "Please try once more. If it repeats, send me that reference so the "
-            "failure can be traced instead of guessing at a fix."
+            "Sorry bro, something went wrong while I was handling that. "
+            "I’m not going to pretend it worked. Try once more in a moment; "
+            "if it keeps happening, I’ll need the server logs to work out why."
         )
 
     await bot.process_commands(message)
