@@ -412,7 +412,7 @@ CHAT_HELP = (
     "• `max knowledge` — query cross-repo knowledge graph\n"
     "• `max proactive <goal>` — get predictive suggestions\n"
     "• `max insights` — personalized recommendations\n"
-    "• `max background <task>` — start a background task with notifications\n"
+    "• Background execution is not yet available; no tasks run asynchronously.\n"
     "• `max email summary to user@example.com` — send an email summary\n"
     "Prefix commands still work: `!max_fix`, `!update_repo`, `!max_brain`, `!max_stats`."
 )
@@ -430,7 +430,7 @@ PERSONA_CARD = (
     "**Knowledge Graph:** `max knowledge` — learn and recall patterns across all repos.\n"
     "**Proactive:** `max proactive <goal>` — I suggest improvements before you ask.\n"
     "**Multimodal:** Drag & drop images/files — I analyze UI bugs and code files.\n"
-    "**Background Tasks:** `max background <task>` — runs async with Discord & email alerts.\n"
+    "**Background Tasks:** execution is not configured; Max does not claim tasks have started.\n"
     "**Email:** `max email summary to user@example.com` — send summaries and digests.\n"
     "No prefix needed — just start with `max` or tag me. (`flanx` remains a supported alias.)"
 )
@@ -755,7 +755,7 @@ async def on_message(message):
                 opener = "Yo! 👋"
             await channel.send(
                 f"{opener} I'm Max — your personal Jarvis AI. I fix code, query knowledge graphs, "
-                "analyze images/files, manage background tasks, and notify you via email."
+                "analyze images/files, and send owner-authorized email notifications."
             )
         elif intent == "knowledge":
             stats = get_knowledge_stats()
