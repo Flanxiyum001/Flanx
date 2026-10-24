@@ -206,6 +206,19 @@ class SetupDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("connect.composio.dev", author.send.await_args.args[0])
         self.assertEqual(adapter.policy.actions, {})
 
+    async def test_capabilities_when_only_connections_are_enabled(self):
+        env = {**self.base, "MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID": "ac_synthetic_123"}
+        adapter = ComposioAdapter.from_env(env)
+        self.assertEqual(adapter.policy.actions, {})
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(main, "composio_adapter", adapter), \
+             patch.object(main, "external_service", None):
+            await main.max_capabilities.callback(self.ctx)
+        output = self.ctx.send.await_args.args[0]
+        self.assertIn("Autonomy:", output)
+        self.assertNotIn("disabled or unavailable", output)
+        self.assertNotIn("ac_synthetic_123", output)
+
     async def test_env_bootstrap_diagnostics_report_ready_without_path_leak(self):
         env = {**self.base, "MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID": "ac_synthetic_123"}
         adapter = ComposioAdapter.from_env(env)
