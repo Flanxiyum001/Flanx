@@ -272,8 +272,8 @@ def composio_setup_issues(environ: Mapping[str, str] | None = None) -> tuple[str
     def check_connection_only() -> None:
         if not auth_id:
             issues.append(
-                "No private Composio policy file is available. For GitHub "
-                "connection-only mode, configure MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID "
+                "No private Composio policy file is available at MAX_COMPOSIO_POLICY_FILE. "
+                "For GitHub connection-only mode, configure MAX_COMPOSIO_GITHUB_AUTH_CONFIG_ID "
                 "with the real dashboard auth-config ID."
             )
             return
