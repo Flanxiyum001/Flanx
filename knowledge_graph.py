@@ -126,20 +126,20 @@ def learn_from_repair(
 ) -> str | None:
     """Extract and store a knowledge entry from a successful repair."""
     _init_db()
-    
+
     if category not in CATEGORIES:
         category = "bug_fix"
-    
+
     language = _extract_language(file_path)
     signature = _normalize_signature(original_code + " -> " + fixed_code)
-    
+
     # Generate explanation using the fix context
     explanation = (
         f"Problem: {goal[:200]}\n"
         f"Validation: {validation_report[:300]}\n"
         f"Pattern: {signature[:100]}"
     )
-    
+
     # Determine tags from goal and code
     tags = []
     goal_lower = goal.lower()
@@ -155,10 +155,10 @@ def learn_from_repair(
         tags.append('database')
     if any(kw in goal_lower for kw in ['api', 'endpoint', 'route', 'http', 'rest', 'graphql']):
         tags.append('api')
-    
+
     now = datetime.now(timezone.utc).isoformat()
     entry_id = f"kg_{abs(hash(signature + repo_name + file_path)) % 10**12:012x}"
-    
+
     with _lock:
         with closing(sqlite3.connect(KNOWLEDGE_DB)) as db, db:
             try:
@@ -187,12 +187,12 @@ def query_knowledge(
 ) -> list[KnowledgeEntry]:
     """Find relevant knowledge entries for a given problem."""
     _init_db()
-    
+
     query_sig = _normalize_signature(problem_description)
-    
+
     where_clauses = ["1=1"]
     params = []
-    
+
     if category:
         where_clauses.append("category = ?")
         params.append(category)
@@ -202,11 +202,11 @@ def query_knowledge(
     if repo_name:
         where_clauses.append("repo_name = ?")
         params.append(repo_name)
-    
+
     # Also search by pattern similarity (simple text matching on signature)
     where_clauses.append("(pattern_signature LIKE ? OR problem_description LIKE ?)")
     params.extend([f"%{query_sig[:50]}%", f"%{problem_description[:50]}%"])
-    
+
     sql = f"""
         SELECT * FROM knowledge
         WHERE {' AND '.join(where_clauses)}
@@ -214,7 +214,7 @@ def query_knowledge(
         LIMIT ?
     """
     params.append(limit)
-    
+
     results = []
     with closing(sqlite3.connect(KNOWLEDGE_DB)) as db:
         db.row_factory = sqlite3.Row
@@ -287,7 +287,7 @@ def format_knowledge_for_context(entries: list[KnowledgeEntry], max_chars: int =
     """Format knowledge entries for inclusion in LLM prompts."""
     if not entries:
         return "No relevant cross-repository knowledge found."
-    
+
     lines = ["--- CROSS-REPOSITORY KNOWLEDGE (learned from past repairs) ---"]
     total = 0
     for entry in entries:
@@ -303,5 +303,5 @@ def format_knowledge_for_context(entries: list[KnowledgeEntry], max_chars: int =
             break
         lines.append(block)
         total += len(block)
-    
+
     return "\n".join(lines)
