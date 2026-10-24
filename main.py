@@ -37,7 +37,7 @@ from model_router import ModelError, ModelRouter, route_model
 from prefs import get_pref
 from task_engine import ActionNotStarted, Orchestrator, Status, Task, TaskFailure
 from approval_publish import PublishConfig, PublishError, PublishingCoordinator
-from composio_adapter import ComposioAdapter, IntegrationError
+from composio_adapter import ComposioAdapter, IntegrationError, composio_setup_issues
 from external_actions import ExternalActionService
 from github_visibility import github_visibility
 from memory_store import MemoryStore
@@ -1412,9 +1412,9 @@ async def _handle_connection(author, channel, request: dict) -> None:
         return
     if composio_adapter is None or composio_adapter.policy.emergency_off:
         await channel.send(
-            "Composio connections are disabled. Configure COMPOSIO_API_KEY, "
-            "MAX_COMPOSIO_POLICY_FILE with `connections`, MAX_COMPOSIO_ENABLED=true, "
-            "and MAX_EXTERNAL_ACTIONS_DISABLED=false."
+            "Composio connection setup is not ready. In a DM to Max, run "
+            "`!max_composio_status` for safe, specific setup instructions. "
+            "No connection request was made."
         )
         return
     try:
@@ -1469,6 +1469,42 @@ async def _handle_connection(author, channel, request: dict) -> None:
         await channel.send(_CONNECTION_ERRORS.get(exc.code, f"Connection request stopped: {exc.code}."))
     except discord.HTTPException:
         await channel.send("I could not send a private DM. Enable DMs and check connection status before retrying.")
+
+
+@bot.command(name="max_composio_status")
+async def max_composio_status(ctx):
+    """Owner-only local configuration diagnostics; never print IDs or secrets."""
+    if ctx.guild is not None:
+        await ctx.send("Use `!max_composio_status` in a DM to Max.")
+        return
+    owner = owner_access(ctx.author.id)
+    if not owner.allowed:
+        await ctx.send(_owner_denial(owner.reason, owner.variable))
+        return
+    issues = composio_setup_issues()
+    if issues:
+        await ctx.send(
+            "Composio setup blockers (no secret values shown):\n"
+            + "\n".join(f"• {issue}" for issue in issues)
+            + "\nAfter resolving them in a **test** deployment, restart Max "
+              "and try `!max_connect github` in DM.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+    if composio_adapter is None or composio_configuration_error is not None:
+        await ctx.send(
+            "Composio initialization failed despite the settings being present. "
+            "Check the private policy validation and service startup logs; "
+            "no connection request was made.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+    await ctx.send(
+        "Composio configuration is present and locally valid (not live-verified). "
+        "Run `!max_connect github` in DM to test the dashboard auth config. "
+        "Connection does not grant repository write access.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @bot.command(name="max_connect")

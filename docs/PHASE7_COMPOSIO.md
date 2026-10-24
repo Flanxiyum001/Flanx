@@ -94,6 +94,47 @@ tool invocation remains disabled pending a separately reviewed orchestrator.
 See [NVIDIA model configuration](NVIDIA_NEMOTRON.md) for the independent
 inference provider.
 
+## Diagnose `max connect github` reporting disabled
+
+The connection handler checks owner authorization **first**. If the owner
+passes but the adapter was disabled or failed to initialize, no Connect Link
+or GitHub authorization request is attempted.
+
+1. In a **DM** from the authorized Discord owner, run
+   `!max_composio_status`. The command reports missing settings, missing
+   or malformed private policy JSON, missing GitHub auth config, sample
+   placeholder IDs, and the emergency disable switch. It **never returns**
+   API key values, private policy contents, account IDs, or OAuth links.
+2. In your Composio dashboard, select the intended project, create a
+   minimally scoped GitHub **auth config**, and find its **real** auth-config
+   ID. The auth-config ID is not the API key and not a connected-account ID.
+3. Place a private JSON file at the container path named by
+   `MAX_COMPOSIO_POLICY_FILE`, following
+   `docs/composio-policy.example.json`. For connecting **only**, start
+   with `{"autonomy":"observe","connections":{"github":"<actual-auth-config-id>"},"github_repository_allowlist":[],"actions":[]}`.
+   This enables the hosted consent link but enables **zero GitHub tools**.
+   Do not paste any real key, private ID, or token into your Git repo.
+4. Set `COMPOSIO_API_KEY` privately, `MAX_COMPOSIO_ENABLED=true`,
+   and after verifying the test account and policy,
+   `MAX_EXTERNAL_ACTIONS_DISABLED=false`. Keep the owner allowlist
+   `MAX_OWNER_DISCORD_IDS` valid (legacy approver fallback works **only**
+   when the primary variable is absent).
+5. **Railway:** `.max_state/` is gitignored, so the policy file is not
+   deployed with GitHub code. Put it on a mounted persistent volume or
+   provision it securely in the container before bot startup. The value of
+   `MAX_COMPOSIO_POLICY_FILE` must be an **absolute or correctly
+   resolved path inside the Railway container**, not a PC file path.
+   Files outside a volume are ephemeral and can disappear at redeployment.
+6. Restart the test bot and DM `!max_composio_status` again. A
+   locally ready report **does not prove Composio credentials are valid**.
+   Next DM `!max_connect github`, complete the private hosted consent
+   link, and check `!max_connection_status github`.
+   Enabling a GitHub connection **never enables repository writes**.
+
+If the status command reports that the policy file is missing, toggling
+`MAX_COMPOSIO_ENABLED=true` alone does not fix it. Do not alter the
+Composio emergency switch before the owner reviews the policy.
+
 ## Conversational connections
 
 The optional `composio==0.18.2` SDK provides `connected_accounts.link`, `list`,

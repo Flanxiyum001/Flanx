@@ -224,6 +224,44 @@ def _validate(value: Any, schema: dict, depth: int = 0) -> bool:
     return True
 
 
+def composio_setup_issues(environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Return safe setup blockers without revealing secrets, IDs, or policy content.
+
+    This checks local configuration only, not live Composio authentication.
+    Never use the result to authorize actions or bypass CapabilityPolicy.
+    """
+    env = os.environ if environ is None else environ
+    issues: list[str] = []
+    if not _flag(env.get("MAX_COMPOSIO_ENABLED")):
+        issues.append("MAX_COMPOSIO_ENABLED is off; enable it only after the private policy is ready.")
+    if not str(env.get("COMPOSIO_API_KEY") or "").strip():
+        issues.append("COMPOSIO_API_KEY is missing; set it privately in the service environment.")
+    path = env.get("MAX_COMPOSIO_POLICY_FILE", "").strip()
+    if not path:
+        issues.append("MAX_COMPOSIO_POLICY_FILE is missing; point it to a private JSON policy file.")
+    else:
+        try:
+            document = json.loads(Path(path).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            issues.append("The configured private policy file was not found in this running environment.")
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            issues.append("The configured private policy file is unreadable or invalid JSON.")
+        else:
+            try:
+                policy = CapabilityPolicy(document)
+            except (ValueError, TypeError):
+                issues.append("The private Composio policy failed schema validation.")
+            else:
+                auth_id = policy.connections.get("github")
+                if not auth_id:
+                    issues.append("The private Composio policy lacks a GitHub auth config in connections.")
+                elif auth_id.startswith("replace-with-"):
+                    issues.append("The GitHub auth-config ID is still a placeholder; use the real dashboard ID.")
+    if _flag(env.get("MAX_EXTERNAL_ACTIONS_DISABLED")):
+        issues.append("MAX_EXTERNAL_ACTIONS_DISABLED is on; this emergency switch also disables connections.")
+    return tuple(issues)
+
+
 class ComposioAdapter:
     def __init__(self, policy: CapabilityPolicy, *, client: Any = None,
                  api_key: str = "", timeout: float = 20):
