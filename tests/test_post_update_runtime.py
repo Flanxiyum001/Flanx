@@ -14,6 +14,7 @@ def fake_message(content, *, attachments=None):
     return SimpleNamespace(
         content=content, attachments=attachments or [], mentions=[],
         author=SimpleNamespace(id=42, bot=False),
+        guild=SimpleNamespace(id=100),
         channel=SimpleNamespace(send=AsyncMock(), id=10),
     )
 
