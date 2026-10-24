@@ -603,10 +603,10 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "help", {}
     if KNOWLEDGE_RE.match(stripped):
         return "knowledge", {"query": stripped}
-    if PROACTIVE_RE.match(stripped):
-        return "proactive", {"query": stripped}
     if INSIGHTS_RE.match(stripped):
         return "insights", {}
+    if PROACTIVE_RE.match(stripped):
+        return "proactive", {"query": stripped}
     if BACKGROUND_RE.match(stripped):
         return "background", {"query": stripped}
     repo = _extract_repo(stripped)
