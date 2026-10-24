@@ -18,10 +18,10 @@ USAGE = [
 ]
 
 EMAIL_RE = re.compile(
-    r"^\\s*(?:send\\s+)?email\\s+(?:to\\s+)?([^\\s@]+@[^\\s@]+\\.[^\\s@]+)(?:\\s+(.*))?\\s*$",
+    r"^\s*(?:send\s+)?email\s+(?:to\s+)?([^\s@]+@[^\s@]+\.[^\s@]+)(?:\s+(.*))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-ADDRESS_RE = re.compile(r"^[^\\s@<>]+@[^\\s@<>]+\\.[^\\s@<>]+$")
+ADDRESS_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
 
 SMTP_HOST = os.getenv("MAX_SMTP_HOST", "smtp.resend.com")
 SMTP_PORT = int(os.getenv("MAX_SMTP_PORT", "587"))
@@ -42,11 +42,11 @@ def match(text: str) -> dict | None:
     # Parse explicit markers in order, without letting optional lazy groups
     # silently swallow the subject/body text.
     if tail:
-        subject_match = re.match(r"^subject:?\\s*(.*)$", tail, re.IGNORECASE | re.DOTALL)
-        about_match = re.match(r"^about\\s+(.*)$", tail, re.IGNORECASE | re.DOTALL)
+        subject_match = re.match(r"^subject:?\s*(.*)$", tail, re.IGNORECASE | re.DOTALL)
+        about_match = re.match(r"^about\s+(.*)$", tail, re.IGNORECASE | re.DOTALL)
         if subject_match:
             subject_and_body = subject_match.group(1).strip()
-            body_match = re.search(r"\\s+body:?\\s+", subject_and_body, re.IGNORECASE)
+            body_match = re.search(r"\s+body:?\s+", subject_and_body, re.IGNORECASE)
             if body_match:
                 subject = subject_and_body[:body_match.start()].strip() or subject
                 body = subject_and_body[body_match.end():].strip()
@@ -67,7 +67,7 @@ def send_email(recipient: str, subject: str, body: str, html_body: str | None = 
     if not ADDRESS_RE.fullmatch(recipient or ""):
         return False
     # Header values must never contain line breaks (prevent header injection).
-    if not subject or len(subject) > 200 or "\\r" in subject or "\\n" in subject:
+    if not subject or len(subject) > 200 or "\r" in subject or "\n" in subject:
         return False
     if len(body or "") > 20_000 or (html_body is not None and len(html_body) > 20_000):
         return False
@@ -105,14 +105,14 @@ async def handle(event, payload: dict) -> str:
 
     if not ADDRESS_RE.fullmatch(recipient):
         return "Invalid recipient email address."
-    if not subject or len(subject) > 200 or "\\r" in subject or "\\n" in subject:
+    if not subject or len(subject) > 200 or "\r" in subject or "\n" in subject:
         return "Invalid email subject."
     if len(body) > 20_000:
         return "Email body is too long (maximum 20,000 characters)."
 
     success = send_email(recipient, subject, body)
     if success:
-        return f"Email sent successfully to `{recipient}`.\\nSubject: *{subject}*"
+        return f"Email sent successfully to `{recipient}`.\nSubject: *{subject}*"
     return (
         "Could not send email. Check the SMTP configuration and sender-domain "
         "verification; provider details are intentionally omitted from logs."
