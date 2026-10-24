@@ -101,7 +101,7 @@ try:
         audit_path=os.path.join(os.path.dirname(TASK_DB), "external_actions.sqlite3"),
         memory_path=os.getenv("MAX_MEMORY_DB") or os.path.join(
             os.path.dirname(TASK_DB), "memories.sqlite3"))
-        if not composio_adapter.policy.emergency_off else None)
+        if not composio_adapter.policy.emergency_off and composio_adapter.policy.actions else None)
     composio_configuration_error = None
 except (ValueError, OSError, IntegrationError) as exc:
     composio_adapter = None
@@ -1545,10 +1545,10 @@ async def max_capabilities(ctx):
     if not _external_admin(ctx):
         await ctx.send("Not authorized.")
         return
-    if external_service is None:
+    if composio_adapter is None or composio_adapter.policy.emergency_off:
         await ctx.send("Composio is disabled or unavailable.")
         return
-    policy = external_service.adapter.policy
+    policy = composio_adapter.policy
     lines = [f"Autonomy: `{policy.autonomy}`; emergency disable: `{policy.emergency_off}`"]
     for action in policy.actions.values():
         disabled = action.toolkit in policy.disabled_integrations or action.slug in policy.disabled_actions
