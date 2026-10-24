@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import smtplib
@@ -110,7 +111,8 @@ async def handle(event, payload: dict) -> str:
     if len(body) > 20_000:
         return "Email body is too long (maximum 20,000 characters)."
 
-    success = send_email(recipient, subject, body)
+    # SMTP can take up to 15 seconds; never block the Discord event loop.
+    success = await asyncio.to_thread(send_email, recipient, subject, body)
     if success:
         return f"Email sent successfully to `{recipient}`.\nSubject: *{subject}*"
     return (

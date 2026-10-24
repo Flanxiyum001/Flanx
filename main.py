@@ -40,7 +40,7 @@ from composio_adapter import ComposioAdapter, IntegrationError, composio_setup_i
 from external_actions import ExternalActionService
 from github_visibility import github_visibility
 from memory_store import MemoryStore
-from authz import GITHUB_ACCESS_DENIED, github_user_allowed, owner_access
+from authz import GITHUB_ACCESS_DENIED, github_user_allowed, owner_access, parse_discord_ids
 from repo_review import (REPO_URL_RE, contains_potential_secret, extract_repository,
                          inspect_repository, normalize_repository, validate_target_path)
 
@@ -402,19 +402,20 @@ CHAT_HELP = (
     "• `max help me with src/app.js in owner/repo — <what to change>`\n"
     "• Mention this bot, then ask it to fix a file in owner/repo\n"
     "• `@Max fix src/app.js in owner/repo: <what to change>`\n"
-    "• `max search <query> for me`\n"
+    "• In a DM: `search Python release notes` (no Max prefix needed)\n"
     "• `max what do you remember about owner/repo`\n"
     "• `max stats` — token usage, estimated cost and sandbox quota\n"
     "• `max set timezone Asia/Kolkata` · `max what time is it`\n"
     "• `max remember <anything>` · `max show notes`\n"
-    "• `max integrations` — list the pluggable modules\n"
+    "• `integrations` — list pluggable modules\n"
     "• `max which repositories can you access?` — private GitHub visibility report\n"
     "• `max knowledge` — query cross-repo knowledge graph\n"
-    "• `max proactive <goal>` — get predictive suggestions\n"
-    "• `max insights` — personalized recommendations\n"
-    "• `max background <task>` — start a background task with notifications\n"
-    "• `max email summary to user@example.com` — send an email summary\n"
-    "Prefix commands still work: `!max_fix`, `!update_repo`, `!max_brain`, `!max_stats`."
+    "• `proactive <goal>` — get predictive suggestions\n"
+    "• `insights` — personalized recommendations\n"
+    "• Background execution is not yet available; no tasks run asynchronously.\n"
+    "• `send email to user@example.com subject Hello body Message` — owner only\n"
+    "DM Max directly without a prefix. In servers, mention Max or use an owner-only opted-in channel.\n"
+    "Legacy `!` commands still work."
 )
 
 PERSONA_CARD = (
@@ -430,9 +431,9 @@ PERSONA_CARD = (
     "**Knowledge Graph:** `max knowledge` — learn and recall patterns across all repos.\n"
     "**Proactive:** `max proactive <goal>` — I suggest improvements before you ask.\n"
     "**Multimodal:** Drag & drop images/files — I analyze UI bugs and code files.\n"
-    "**Background Tasks:** `max background <task>` — runs async with Discord & email alerts.\n"
+    "**Background Tasks:** execution is not configured; Max does not claim tasks have started.\n"
     "**Email:** `max email summary to user@example.com` — send summaries and digests.\n"
-    "No prefix needed — just start with `max` or tag me. (`flanx` remains a supported alias.)"
+    "In DMs, speak naturally without a prefix. In servers, mention me, use `max`, or opt in an owner channel."
 )
 
 FILE_EXT_PATTERN = (
@@ -533,6 +534,123 @@ def _strip_name_trigger(text: str) -> "str | None":
     return remainder
 
 
+def _natural_message_text(message) -> str | None:
+    """Pick deliberate conversations; guilds never become an open hot mic."""
+    text = (getattr(message, "content", "") or "").strip()
+    # Legacy prefixed commands are always handled by discord.py, once.
+    if text.startswith("!"):
+        return None
+    if bot.user and any(user.id == bot.user.id for user in getattr(message, "mentions", ())):
+        return re.sub(rf"<@!?{bot.user.id}>", "", text).strip()
+    named = _strip_name_trigger(text)
+    if named is not None:
+        return named
+    guild = getattr(message, "guild", getattr(message.channel, "guild", None))
+    if guild is None:
+        # DMs are already addressed to the bot: no name or prefix needed.
+        return text if text or getattr(message, "attachments", None) else None
+    # Group/server passive listening requires an explicit channel allowlist and
+    # an authorized owner. No default server-wide or all-user listening.
+    channel_ids, status = parse_discord_ids(os.getenv("MAX_NATURAL_CHANNEL_IDS"))
+    if (status == "ok" and getattr(message.channel, "id", None) in channel_ids
+            and owner_access(message.author.id).allowed):
+        return text if text or getattr(message, "attachments", None) else None
+    return None
+
+
+def _plain_request(text: str) -> str:
+    """Remove bounded courtesy prefixes only for deterministic commands."""
+    return re.sub(
+        r"^\s*(?:(?:please|pls)\s+|(?:can|could|would)\s+you\s+){1,2}",
+        "", text or "", flags=re.IGNORECASE,
+    ).strip()
+
+
+def natural_command_intent(text: str) -> dict | None:
+    """Allow only exact, auditable language-to-command mappings.
+
+    Never let model output invoke commands, and never infer tool arguments.
+    The called command callback still performs its original authorization.
+    """
+    statement = _plain_request(text).strip().rstrip("?.!").strip()
+    fixed = (
+        (r"(?:max_composio_status|(?:check|show|get)\s+(?:my\s+)?composio"
+         r"(?:\s+(?:setup|connection))?\s+status|composio\s+status)",
+         "composio_status"),
+        (r"(?:max_capabilities|(?:show|list|what\s+are)\s+(?:my\s+)?"
+         r"(?:available\s+)?(?:tools|capabilities))",
+         "capabilities"),
+        (r"(?:max_inference_status|(?:show|check|get)\s+(?:my\s+)?"
+         r"(?:inference|model)\s+status)",
+         "inference_status"),
+        (r"(?:max_connections|(?:show|list)\s+(?:my\s+)?connections)",
+         "connections"),
+        (r"(?:max_github_repos|(?:show|list)\s+(?:my\s+)?github\s+repos(?:itories)?)",
+         "github_repos"),
+        (r"(?:max_voice|(?:join|start)\s+(?:my\s+)?voice\s+channel)",
+         "voice_join"),
+        (r"(?:max_voice_leave|(?:leave|stop)\s+(?:the\s+)?voice\s+channel)",
+         "voice_leave"),
+        (r"(?:max_tool_disable|disable\s+(?:all\s+)?composio\s+tools)",
+         "tool_disable"),
+    )
+    for pattern, command in fixed:
+        if re.fullmatch(pattern, statement, re.IGNORECASE):
+            return {"command": command}
+
+    connect = re.fullmatch(
+        r"(?:max_connect|connect(?:\s+(?:to|my))?)\s+"
+        r"(?P<toolkit>github|google\s*calendar)",
+        statement, re.IGNORECASE,
+    )
+    if connect:
+        toolkit = connect.group("toolkit").lower().replace(" ", "")
+        return {"command": "connect", "toolkit": toolkit}
+
+    tool = re.fullmatch(
+        r"(?:run|execute|call)\s+(?:composio\s+)?tool\s+"
+        r"(?P<account>ca_[A-Za-z0-9_-]{1,120})\s+"
+        r"(?P<slug>[A-Z][A-Z0-9_]{1,119})(?:\s+(?P<json>\{.{0,4000}\}))?",
+        statement, re.DOTALL,
+    )
+    if tool:
+        return {"command": "tool", "account": tool.group("account"),
+                "slug": tool.group("slug"), "arguments": tool.group("json") or "{}"}
+    return None
+
+
+async def _run_natural_command(message, request: dict) -> None:
+    """Use existing command callbacks, not a new unchecked execution path."""
+    command = request["command"]
+    if command == "connect":
+        await _handle_connection(message.author, message.channel,
+                                 {"operation": "connect", "toolkit": request["toolkit"]})
+        return
+    if command == "connections":
+        await _handle_connection(message.author, message.channel, {"operation": "list"})
+        return
+    if command == "github_repos":
+        await _handle_github_visibility(message.author, message.channel)
+        return
+    ctx = await bot.get_context(message)
+    callbacks = {
+        "composio_status": max_composio_status,
+        "capabilities": max_capabilities,
+        "inference_status": max_inference_status,
+        "voice_join": max_voice,
+        "voice_leave": max_voice_leave,
+        "tool_disable": max_tool_disable,
+        "tool": max_tool,
+    }
+    if command == "tool":
+        await callbacks[command].callback(
+            ctx, request["account"], request["slug"],
+            arguments_json=request["arguments"],
+        )
+    else:
+        await callbacks[command].callback(ctx)
+
+
 def _extract_repo(text: str) -> "str | None":
     """First owner/repo token that is not a file path like src/app.py."""
     return extract_repository(text)
@@ -580,10 +698,13 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     stripped = (text or "").strip().strip("?.!")
     if not stripped:
         return "help", {}
-    connection = connection_intent(text)
+    native = natural_command_intent(text)
+    if native:
+        return "native_command", native
+    connection = connection_intent(_plain_request(text))
     if connection:
         return "connection", connection
-    if GITHUB_VISIBILITY_RE.fullmatch(text or ""):
+    if GITHUB_VISIBILITY_RE.fullmatch(_plain_request(text)):
         return "github_visibility", {}
     extension = integrations.match(stripped)
     if extension:
@@ -603,10 +724,10 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "help", {}
     if KNOWLEDGE_RE.match(stripped):
         return "knowledge", {"query": stripped}
-    if PROACTIVE_RE.match(stripped):
-        return "proactive", {"query": stripped}
     if INSIGHTS_RE.match(stripped):
         return "insights", {}
+    if PROACTIVE_RE.match(stripped):
+        return "proactive", {"query": stripped}
     if BACKGROUND_RE.match(stripped):
         return "background", {"query": stripped}
     repo = _extract_repo(stripped)
@@ -629,7 +750,7 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
     # Only enter the code-repair workflow when the user gives a repair/update verb,
     # a repository, or a file path. Ordinary questions should receive an answer.
     if not FIX_VERB_RE.match(stripped):
-        return "general", {"prompt": stripped}
+        return "general", {"prompt": (text or "").strip()}
     return "fix", {
         "repo": repo or default_repo,
         "file": file_path,
@@ -653,23 +774,22 @@ def discord_data_class(prompt: str) -> str:
 async def on_ready():
     print(f"🤖 Max online as {bot.user} (chat mode + free sandbox + cloud task staging)")
     await bot.change_presence(
-        activity=discord.Game(name="just say 'max …' · !max_fix · !update_repo")
+        activity=discord.Game(name="DM me naturally · mention me in servers")
     )
 
 
 @bot.event
 async def on_message(message):
-    """Chat mode: a bot mention or 'max …' with no prefix, alongside !commands."""
+    """Direct DMs, mentions or explicitly opted-in owner channels."""
     if message.author.bot:
         return
 
-    text = (message.content or "").strip()
-    if bot.user and any(user.id == bot.user.id for user in message.mentions):
-        remainder = re.sub(rf"<@!?{bot.user.id}>", "", text).strip()
-    else:
-        remainder = _strip_name_trigger(text)
+    remainder = _natural_message_text(message)
+    if remainder is None:
+        await bot.process_commands(message)
+        return
 
-    # Handle multimodal attachments if present
+    # Handle multimodal attachments only when Max is addressed
     if getattr(message, "attachments", None):
         async with message.channel.typing():
             analyses = await handle_discord_attachments(message, context=message.content)
@@ -683,7 +803,7 @@ async def on_message(message):
     channel = message.channel
     # The knowledge graph can contain source-derived fixes from private repositories.
     # Treat knowledge retrieval as a GitHub-scoped operation, not public chat.
-    uses_github = intent in {"fix", "review", "brain", "knowledge"} or (
+    uses_github = intent in {"fix", "review", "brain", "knowledge", "proactive", "insights"} or (
         intent == "integration" and payload["name"] in {"repos", "lessons"}
     )
     if uses_github and not github_user_allowed(message.author.id):
@@ -691,7 +811,9 @@ async def on_message(message):
         await bot.process_commands(message)
         return
     try:
-        if intent == "connection":
+        if intent == "native_command":
+            await _run_natural_command(message, payload)
+        elif intent == "connection":
             await _handle_connection(message.author, channel, payload)
         elif intent == "github_visibility":
             await _handle_github_visibility(message.author, channel)
@@ -749,7 +871,7 @@ async def on_message(message):
                 opener = "Yo! 👋"
             await channel.send(
                 f"{opener} I'm Max — your personal Jarvis AI. I fix code, query knowledge graphs, "
-                "analyze images/files, manage background tasks, and notify you via email."
+                "analyze images/files, and send owner-authorized email notifications."
             )
         elif intent == "knowledge":
             stats = get_knowledge_stats()
@@ -761,7 +883,8 @@ async def on_message(message):
                 f"```\n{clip(formatted, 1700)}\n```"
             )
         elif intent == "proactive":
-            msg = await proactive_engine.generate_proactive_response(
+            msg = await asyncio.to_thread(
+                proactive_engine.generate_proactive_message,
                 message.author.id, goal=payload.get("query")
             )
             if msg:
@@ -769,19 +892,15 @@ async def on_message(message):
             else:
                 await channel.send("💡 No proactive suggestions right now. Keep coding!")
         elif intent == "insights":
-            insights = proactive_engine.get_personalized_insights(message.author.id)
+            insights = await asyncio.to_thread(
+                proactive_engine.get_personalized_insights, message.author.id
+            )
             await channel.send(insights)
         elif intent == "background":
-            task = notification_system.create_task(
-                user_id=message.author.id,
-                channel_id=channel.id,
-                task_type="background_job",
-                description=payload.get("query", "Background Task"),
-            )
             await channel.send(
-                f"⚙️ **Background Task Started** (`{task.task_id}`)\n"
-                f"Description: `{task.description}`\n"
-                "I will notify you here and via DM when complete."
+                "Background task execution is not available yet. "
+                "No task was started or scheduled. Use an existing command "
+                "for a task I can actually perform now."
             )
         elif intent == "brain":
             repo = payload["repo"]
@@ -1395,10 +1514,17 @@ async def max_knowledge(ctx):
 @bot.command(name="max_proactive")
 async def max_proactive(ctx, *, goal: str = None):
     """Trigger proactive assistance suggestions."""
+    if not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
+        return
     if goal:
-        msg = proactive_engine.generate_proactive_message(ctx.author.id, goal=goal)
+        msg = await asyncio.to_thread(
+            proactive_engine.generate_proactive_message, ctx.author.id, goal=goal
+        )
     else:
-        msg = proactive_engine.get_personalized_insights(ctx.author.id)
+        msg = await asyncio.to_thread(
+            proactive_engine.get_personalized_insights, ctx.author.id
+        )
     if msg:
         await ctx.send(msg)
     else:
@@ -1408,18 +1534,10 @@ async def max_proactive(ctx, *, goal: str = None):
 @bot.command(name="max_background")
 async def max_background(ctx, *, description: str):
     """Start a background task with completion notifications."""
-    task = notification_system.create_task(
-        user_id=ctx.author.id,
-        channel_id=ctx.channel.id,
-        task_type="background_job",
-        description=description,
-        notify_channel=True,
-        notify_dm=True,
-    )
     await ctx.send(
-        f"⚙️ **Background Task Started** (`{task.task_id}`)\n"
-        f"Description: `{task.description}`\n"
-        "I will notify you here and via DM when the task completes."
+        "Background task execution is not available yet. "
+        "No task was started or scheduled. Use an existing command "
+        "for a task I can actually perform now."
     )
 
 
@@ -1427,7 +1545,7 @@ async def max_background(ctx, *, description: str):
 async def max_bg_status(ctx, task_id: str):
     """Check background task status."""
     task = notification_system.get_task(task_id)
-    if task:
+    if task is not None and task.user_id == ctx.author.id:
         await ctx.send(f"Background task `{task_id}`: status=`{task.status}`, created at {task.created_at[:16]}")
     else:
         await ctx.send(f"Unknown background task `{task_id}`.")
