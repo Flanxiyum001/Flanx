@@ -162,14 +162,12 @@ Provide:
                 reply = await self.router.generate(
                     messages=[
                         {"role": "system", "content": "You are Max, a senior engineer analyzing visual content for code issues. Be specific and actionable."},
-                        {"role": "user", "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                        ]}
+                        # Ollama's native chat API accepts base64 images on message.images.
+                        # ModelRouter rejects OpenAI-style list content; never send
+                        # unredactable screenshot bytes to a cloud provider.
+                        {"role": "user", "content": prompt, "images": [img_b64]},
                     ],
-                    task="review",
-                    # User screenshots can contain private code, tokens, or personal data.
-                    # Route through the source-data policy instead of implicitly treating them as public.
+                    task="vision", provider="local",
                     data_class="source",
                     max_tokens=1500,
                 )
