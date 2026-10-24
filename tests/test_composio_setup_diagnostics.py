@@ -77,7 +77,7 @@ class SetupDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"MAX_OWNER_DISCORD_IDS": "42",
                                       "MAX_COMPOSIO_ENABLED": "false",
                                       "COMPOSIO_API_KEY": "secret-never-print",
-                                      "MAX_COMPOSIO_POLICY_FILE": str(self.file)}, clear=True), \\
+                                      "MAX_COMPOSIO_POLICY_FILE": str(self.file)}, clear=True), \
              patch.object(main, "composio_adapter", None):
             await main.max_composio_status.callback(self.ctx)
         body = self.ctx.send.await_args.args[0]
@@ -100,9 +100,9 @@ class SetupDiagnosticTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ready_message_does_not_claim_live_auth(self):
         self.write_policy()
-        with patch.dict(os.environ, self.base, clear=True), \\
+        with patch.dict(os.environ, self.base, clear=True), \
              patch.object(main, "composio_adapter", SimpleNamespace(
-                 policy=SimpleNamespace(emergency_off=False))), \\
+                 policy=SimpleNamespace(emergency_off=False))), \
              patch.object(main, "composio_configuration_error", None):
             await main.max_composio_status.callback(self.ctx)
         self.assertIn("not live-verified", self.ctx.send.await_args.args[0])
@@ -110,7 +110,7 @@ class SetupDiagnosticTests(unittest.IsolatedAsyncioTestCase):
     async def test_connect_error_points_to_status_command(self):
         author = SimpleNamespace(id=42, send=AsyncMock())
         channel = SimpleNamespace(guild=object(), send=AsyncMock())
-        with patch.dict(os.environ, {"MAX_OWNER_DISCORD_IDS": "42"}, clear=True), \\
+        with patch.dict(os.environ, {"MAX_OWNER_DISCORD_IDS": "42"}, clear=True), \
              patch.object(main, "composio_adapter", None):
             await main._handle_connection(
                 author, channel, {"operation": "connect", "toolkit": "github"})
