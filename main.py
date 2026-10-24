@@ -683,7 +683,9 @@ async def on_message(message):
 
     intent, payload = chat_intent(remainder, get_pref(message.author.id, "repo", FLANX_DEFAULT_REPO))
     channel = message.channel
-    uses_github = intent in {"fix", "review", "brain"} or (
+    # The knowledge graph can contain source-derived fixes from private repositories.
+    # Treat knowledge retrieval as a GitHub-scoped operation, not public chat.
+    uses_github = intent in {"fix", "review", "brain", "knowledge"} or (
         intent == "integration" and payload["name"] in {"repos", "lessons"}
     )
     if uses_github and not github_user_allowed(message.author.id):
