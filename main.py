@@ -12,8 +12,7 @@ Pipeline for `!max_fix <owner/repo> <path/to/file.py> <what to change>`:
      authenticated Discord approval and explicit configuration
 
 All blocking work (GitHub, HTTP sandbox, web search) runs in threads so the
-Discord gateway connection never stalls.
-"""
+Discord gateway connection never stalls.\n"""
 
 from __future__ import annotations
 
@@ -46,6 +45,12 @@ from repo_review import (REPO_URL_RE, contains_potential_secret, extract_reposit
                          inspect_repository, normalize_repository, validate_target_path)
 
 import integrations  # pluggable modules: drop a file into integrations/ to add one
+
+# --- New Jarvis-like features ---
+from knowledge_graph import learn_from_repair, query_knowledge, format_knowledge_for_context, get_knowledge_stats
+from proactive_assist import proactive_engine, get_proactive_engine
+from multimodal import multimodal_processor, handle_discord_attachments, format_analysis_result
+from notifications import notification_system, get_notification_system
 
 try:
     from ddgs import DDGS
@@ -184,8 +189,7 @@ Rules:
 {baseline}
 
 --- FILE UNDER REPAIR: {file_path} ({branch_default}) ---
-{original_code}
-"""
+{original_code}\n"""
 
 
 # --------------------------------------------------------------------------
@@ -404,6 +408,11 @@ CHAT_HELP = (
     "• `max remember <anything>` · `max show notes`\n"
     "• `max integrations` — list the pluggable modules\n"
     "• `max which repositories can you access?` — private GitHub visibility report\n"
+    "• `max knowledge` — query cross-repo knowledge graph\n"
+    "• `max proactive <goal>` — get predictive suggestions\n"
+    "• `max insights` — personalized recommendations\n"
+    "• `max background <task>` — start a background task with notifications\n"
+    "• `max email summary to user@example.com` — send an email summary\n"
     "Prefix commands still work: `!max_fix`, `!update_repo`, `!max_brain`, `!max_stats`."
 )
 
@@ -417,6 +426,11 @@ PERSONA_CARD = (
     "usage stats (`max stats`).\n"
     "**Extensions:** `max integrations` lists the pluggable modules — drop a new file "
     "into `integrations/` to add one.\n"
+    "**Knowledge Graph:** `max knowledge` — learn and recall patterns across all repos.\n"
+    "**Proactive:** `max proactive <goal>` — I suggest improvements before you ask.\n"
+    "**Multimodal:** Drag & drop images/files — I analyze UI bugs and code files.\n"
+    "**Background Tasks:** `max background <task>` — runs async with Discord & email alerts.\n"
+    "**Email:** `max email summary to user@example.com` — send summaries and digests.\n"
     "No prefix needed — just start with `max` or tag me. (`flanx` remains a supported alias.)"
 )
 
@@ -554,8 +568,14 @@ def _clean_goal(text: str, repo: "str | None", file_path: "str | None") -> str:
     return re.sub(r"^(?:in|on|for)\s+(?=\S)", "", goal).strip(" ,:;|-—")
 
 
+KNOWLEDGE_RE = re.compile(r"^\s*(?:what\s+)?(?:knowledge|patterns|lessons|learned|cross\s*repo)\b", re.IGNORECASE)
+PROACTIVE_RE = re.compile(r"^\s*(?:proactive|predict|suggest|insights?)\b", re.IGNORECASE)
+INSIGHTS_RE = re.compile(r"^\s*(?:insights?|personalized|my\s+history|what\s+do\s+you\s+know\s+about\s+me)\b", re.IGNORECASE)
+BACKGROUND_RE = re.compile(r"^\s*(?:background|run\s+in\s+background|schedule|notify\s+me)\b", re.IGNORECASE)
+
+
 def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dict]":
-    """Classify a chat request: greeting/time/notes/who … or search/brain/help/fix."""
+    """Classify a chat request: greeting/time/notes/who … or search/brain/help/fix/knowledge/proactive."""
     stripped = (text or "").strip().strip("?.!")
     if not stripped:
         return "help", {}
@@ -583,6 +603,14 @@ def chat_intent(text: str, default_repo: "str | None" = None) -> "tuple[str, dic
         return "greeting", {"text": stripped}
     if HELP_RE.match(stripped):
         return "help", {}
+    if KNOWLEDGE_RE.match(stripped):
+        return "knowledge", {"query": stripped}
+    if PROACTIVE_RE.match(stripped):
+        return "proactive", {"query": stripped}
+    if INSIGHTS_RE.match(stripped):
+        return "insights", {}
+    if BACKGROUND_RE.match(stripped):
+        return "background", {"query": stripped}
     repo = _extract_repo(stripped)
     file_path = _extract_file(stripped)
     if REVIEW_RE.match(stripped):
@@ -643,13 +671,21 @@ async def on_message(message):
     else:
         remainder = _strip_name_trigger(text)
 
-    if remainder is None:
-        await bot.process_commands(message)
-        return
+    # Handle multimodal attachments if present
+    if getattr(message, "attachments", None):
+        async with message.channel.typing():
+            analyses = await handle_discord_attachments(message, context=message.content)
+            for analysis in analyses:
+                formatted = format_analysis_result(analysis)
+                await message.channel.send(formatted)
+        if not remainder:
+            return
 
     intent, payload = chat_intent(remainder, get_pref(message.author.id, "repo", FLANX_DEFAULT_REPO))
     channel = message.channel
-    uses_github = intent in {"fix", "review", "brain"} or (
+    # The knowledge graph can contain source-derived fixes from private repositories.
+    # Treat knowledge retrieval as a GitHub-scoped operation, not public chat.
+    uses_github = intent in {"fix", "review", "brain", "knowledge"} or (
         intent == "integration" and payload["name"] in {"repos", "lessons"}
     )
     if uses_github and not github_user_allowed(message.author.id):
@@ -714,8 +750,40 @@ async def on_message(message):
             else:
                 opener = "Yo! 👋"
             await channel.send(
-                f"{opener} I'm Max — I patch code on GitHub, search the web, keep time "
-                "and take notes for you. Try `max help` for the full menu."
+                f"{opener} I'm Max — your personal Jarvis AI. I fix code, query knowledge graphs, "
+                "analyze images/files, manage background tasks, and notify you via email."
+            )
+        elif intent == "knowledge":
+            stats = get_knowledge_stats()
+            entries = query_knowledge(payload["query"], limit=5)
+            formatted = format_knowledge_for_context(entries)
+            await channel.send(
+                f"🧠 **Cross-Repository Knowledge Graph**\n"
+                f"Total entries: `{stats['total_entries']}` | Categories: `{len(stats['by_category'])}`\n\n"
+                f"```\n{clip(formatted, 1700)}\n```"
+            )
+        elif intent == "proactive":
+            msg = await proactive_engine.generate_proactive_response(
+                message.author.id, goal=payload.get("query")
+            )
+            if msg:
+                await channel.send(msg)
+            else:
+                await channel.send("💡 No proactive suggestions right now. Keep coding!")
+        elif intent == "insights":
+            insights = proactive_engine.get_personalized_insights(message.author.id)
+            await channel.send(insights)
+        elif intent == "background":
+            task = notification_system.create_task(
+                user_id=message.author.id,
+                channel_id=channel.id,
+                task_type="background_job",
+                description=payload.get("query", "Background Task"),
+            )
+            await channel.send(
+                f"⚙️ **Background Task Started** (`{task.task_id}`)\n"
+                f"Description: `{task.description}`\n"
+                "I will notify you here and via DM when complete."
             )
         elif intent == "brain":
             repo = payload["repo"]
@@ -1156,6 +1224,21 @@ async def fix_pipeline(ctx, repo_name: str, file_path: str, diagnostic_goal: str
             )
             await ctx.send("✅ Patch passed sandbox validation. " + pending)
 
+            # Learn from the repair (cross-repository knowledge graph)
+            asyncio.create_task(
+                asyncio.to_thread(
+                    learn_from_repair, repo_name, file_path, original_code, raw_patch,
+                    diagnostic_goal, validation.for_prompt("validation run"),
+                )
+            )
+
+            # Proactive suggestions for next steps
+            suggestions = proactive_engine.generate_proactive_message(
+                requester_id, file_path, raw_patch, diagnostic_goal
+            )
+            if suggestions:
+                await ctx.send(suggestions)
+
     except GithubException as exc:
         await ctx.send(f"⚠️ GitHub request failed (HTTP {exc.status}). No repository write was made.")
     except Exception:
@@ -1243,10 +1326,95 @@ async def flanx_brain(ctx, repo_name: str):
     await ctx.send(f"🧠 **Brain memory for `{repo_name}`**\n```\n{clip(memory, 1800)}\n```")
 
 
+@bot.command(name="max_learn")
+async def max_learn(ctx, category: str, *, content: str):
+    """Manually add a knowledge entry to the cross-repository knowledge graph."""
+    entry_id = learn_from_repair(
+        repo_name=f"manual:{ctx.author.id}",
+        file_path="manual_entry",
+        original_code="",
+        fixed_code=content[:2000],
+        goal=content,
+        validation_report="Manually added via !max_learn",
+        category=category,
+    )
+    if entry_id:
+        await ctx.send(f"🧠 Learned! Knowledge entry `{entry_id}` added to category `{category}`.")
+    else:
+        await ctx.send("⚠️ Failed to add knowledge entry.")
+
+
 @bot.command(name="max_stats", aliases=["mex_stats", "flanx_stats"])
 async def flanx_stats(ctx):
     """Show LLM token usage, estimated cost and sandbox quota consumption."""
-    await ctx.send(await asyncio.to_thread(format_usage))
+    stats = await asyncio.to_thread(format_usage)
+    knowledge_stats = get_knowledge_stats()
+    await ctx.send(f"{stats}\n\n🧠 Knowledge Graph: {knowledge_stats['total_entries']} learned patterns across {len(knowledge_stats['top_repositories'])} repositories.")
+
+
+@bot.command(name="max_knowledge")
+async def max_knowledge(ctx):
+    """Query the cross-repository knowledge graph."""
+    if not github_user_allowed(ctx.author.id):
+        await ctx.send(GITHUB_ACCESS_DENIED)
+        return
+    stats = get_knowledge_stats()
+    lines = ["🧠 **Knowledge Graph Statistics**",
+             f"Total patterns learned: `{stats['total_entries']}`"]
+    if stats['by_category']:
+        lines.append("\n**By Category:**")
+        for cat, count in stats['by_category'].items():
+            lines.append(f"  • {cat}: {count}")
+    if stats['by_language']:
+        lines.append("\n**By Language:**")
+        for lang, count in stats['by_language'].items():
+            lines.append(f"  • {lang}: {count}")
+    if stats['top_repositories']:
+        lines.append("\n**Top Repositories:**")
+        for repo, count in list(stats['top_repositories'].items())[:5]:
+            lines.append(f"  • {repo}: {count} patterns")
+    await ctx.send("\n".join(lines))
+
+
+@bot.command(name="max_proactive")
+async def max_proactive(ctx, *, goal: str = None):
+    """Trigger proactive assistance suggestions."""
+    if goal:
+        msg = proactive_engine.generate_proactive_message(ctx.author.id, goal=goal)
+    else:
+        msg = proactive_engine.get_personalized_insights(ctx.author.id)
+    if msg:
+        await ctx.send(msg)
+    else:
+        await ctx.send("💡 No proactive suggestions at the moment.")
+
+
+@bot.command(name="max_background")
+async def max_background(ctx, *, description: str):
+    """Start a background task with completion notifications."""
+    task = notification_system.create_task(
+        user_id=ctx.author.id,
+        channel_id=ctx.channel.id,
+        task_type="background_job",
+        description=description,
+        notify_channel=True,
+        notify_dm=True,
+    )
+    await ctx.send(
+        f"⚙️ **Background Task Started** (`{task.task_id}`)\n"
+        f"Description: `{task.description}`\n"
+        "I will notify you here and via DM when the task completes."
+    )
+
+
+@bot.command(name="max_bg_status")
+async def max_bg_status(ctx, task_id: str):
+    """Check background task status."""
+    task = notification_system.get_task(task_id)
+    if task:
+        await ctx.send(f"Background task `{task_id}`: status=`{task.status}`, created at {task.created_at[:16]}")
+    else:
+        await ctx.send(f"Unknown background task `{task_id}`.")
 
 
 @bot.command(name="max_inference_status")

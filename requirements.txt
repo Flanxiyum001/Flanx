@@ -5,3 +5,5 @@ PyGithub>=2.3.0
 requests>=2.31.0
 ddgs>=9.0.0
 composio==0.18.2
+Pillow>=10.0.0
+# Email integration uses stdlib smtplib; no extra deps needed
