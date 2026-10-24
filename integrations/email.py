@@ -18,7 +18,7 @@ USAGE = [
 ]
 
 EMAIL_RE = re.compile(
-    r"^\s*(?:send\s+)?email\s+(?:to\s+)?([^\s@]+@[^\s@]+\.[^\s@]+)(?:\s+(.*))?\s*$",
+    r"^\s*(?:max\s+)?(?:send\s+)?email\s+(?:to\s+)?([^\s@]+@[^\s@]+\.[^\s@]+)(?:\s+(.*))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 ADDRESS_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
